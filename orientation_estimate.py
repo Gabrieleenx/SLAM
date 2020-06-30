@@ -11,11 +11,10 @@ from geometry_msgs.msg import Quaternion
 # calibration imu, both gyro and acc
 # figure out why EKF in measurement update has a unstable error covariance estimation 
 # worst case use complementary filter instead... 
-# change conversion from quat to euler from xyz too zyx
 
 #np.set_printoptions(precision=None, suppress=None)
 
-class Slam(object):
+class Orientation_estimate(object):
 	def __init__(self):
 		self.last_time = 0.0
 		self.euler_xyz = np.array([[0.0], [0.0], [0.0]])
@@ -45,8 +44,7 @@ class Slam(object):
 		self.quaternions, self.P = orientation_acc_update(self.quaternions, self.P, acc, self.cov_acc, self.grav)
 		self.quaternions = normalize_quat(self.quaternions)
 		
-		self.euler_xyz = quaternions_to_euler_zyx(self.quaternions)
-		print(self.euler_xyz)
+		return quaternions_to_euler_zyx(self.quaternions)
 		
 		
 def orientation_prediction(q, P, delta_time, gyro, correction_gyro, cov_gyro):
@@ -153,26 +151,8 @@ def quaternions_to_euler_zyx(q):
 		x_ = 2*np.arctan2(x,w) - np.sign(xz)*z_
 	return np.array([[z_], [y_], [x_]])
 
+
 def normalize_quat(q):
 	return q / np.linalg.norm(q)
-
-def listener():
-	slam = Slam()
-
-	rospy.init_node('listener_IMU', anonymous=True) # Creates Node ID
-
-	gyr_sub = message_filters.Subscriber("/camera/gyro/sample", Imu)
-	acc_sub = message_filters.Subscriber("/camera/accel/sample", Imu)
-
-	# using approximate synchronizer. 
-	ts = message_filters.ApproximateTimeSynchronizer([gyr_sub, acc_sub], 1, 0.005, allow_headerless=False)
-	ts.registerCallback(slam.callback)
-
-
-	rospy.spin()
-
-
-if __name__ == '__main__':
-    listener()
 
 

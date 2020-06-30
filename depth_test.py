@@ -8,7 +8,7 @@ import message_filters
 import numpy as np
 from struct import *
 import sys
-
+from orientation_estimate import Orientation_estimate
 
 #np.set_printoptions(threshold=sys.maxsize)
 class SLAM(object):
@@ -22,26 +22,26 @@ class SLAM(object):
         self.width = width
         self.focal_point = 385.0
         self.horizontal_distance = np.reshape(np.arange(640)-320, (1, 640)) / self.focal_point
-        self.vertical_distance = np.reshape(np.arange(480)-240, (480, 1)) / self.focal_point
+        self.vertical_distance = -1*np.reshape(np.arange(480)-240, (480, 1)) / self.focal_point
         #map
         self.map_x = 10
         self.map_y = 10
         self.map_z = 6
         self.map_resolution_m = 0.05 # 0.05 m resolution
         self.map_xyz = np.zeros((int(self.map_x//self.map_resolution_m), int(self.map_y//self.map_resolution_m), int(self.map_z//self.map_resolution_m)))
-
         self.reshape_index_m = np.array([int(self.map_y//self.map_resolution_m) * int(self.map_z//self.map_resolution_m), 
                                         int(self.map_z//self.map_resolution_m), 1])
         self.map_max_index =int(self.map_x//self.map_resolution_m) * int(self.map_y//self.map_resolution_m) * int(self.map_z//self.map_resolution_m) -1
+        self.map_threshold = 0.5
         # rotation and position
         self.euler_zyx = np.array([[0.0], [0.0], [0.0]])
         self.pos_xyz = np.array([[self.map_x], [self.map_y], [self.map_z]])/(2)
-
+        self.oritentaion = Orientation_estimate()
         # publish
         self.pub = rospy.Publisher('/PointCloud', PointCloud, queue_size=1)
 
 
-    def callback(self, data):
+    def callback(self, data, gyr_data, acc_data):
         print('thats up')
         # convert byte data to numpy 2d array
         k = np.frombuffer(data.data, dtype=np.uint16)
@@ -53,10 +53,13 @@ class SLAM(object):
         self.dist_z_img = np.multiply(self.dist_y_img, self.vertical_distance)
         self.cloudpoints = self.img_to_cloudpoints()
 
-        T_cloud = self.Rotate_zyx_Translate_points(Rz=0, Ry=0, Rx=0, Tx=self.pos_xyz[0, 0], Ty=self.pos_xyz[1, 0] , Tz=self.pos_xyz[2, 0])
+        self.euler_zyx = self.oritentaion.callback(gyr_data, acc_data)
+        print(self.euler_zyx)
+        T_cloud = self.Rotate_zyx_Translate_points(Rz=self.euler_zyx[0,0], Ry=self.euler_zyx[1,0], Rx=self.euler_zyx[2,0], Tx=self.pos_xyz[0, 0], Ty=self.pos_xyz[1, 0] , Tz=self.pos_xyz[2, 0])
         self.add_points_to_map(T_cloud)
         # will be on its own therad in future...
-        self.Publich_PointCloud(T_cloud)
+        Map_point_cloud = self.Map_to_point_cloud()
+        self.Publich_PointCloud(Map_point_cloud)
 
     def img_to_cloudpoints(self):
         cloudpoints = np.zeros((self.height*self.width, 3))
@@ -77,7 +80,7 @@ class SLAM(object):
         # want a faster method for convertion to array of Point32. 
         for i in range(cloudpoints.shape[0]//10):
             j = i*10
-            cloud_msg.points.append(Point32(-cloudpoints[j, 1], cloudpoints[j, 2], cloudpoints[j, 0])) 
+            cloud_msg.points.append(Point32(-cloudpoints[j, 1], -cloudpoints[j, 2], cloudpoints[j, 0])) 
             # Rviz vizualization is retarded, -y,z,x instead of xyz!! might be bug in Rviz for pointcloud. 
         self.pub.publish(cloud_msg)
 
@@ -112,9 +115,9 @@ class SLAM(object):
         return new_points
 
     def add_points_to_map(self, T_cloud):
-        #faster
+        #faster, need further implementations
         map_point_index = T_cloud/self.map_resolution_m
-        self.map_xyz += -0.05        
+        self.map_xyz += -0.0005 # will be removed and replaced by something more sophisticated       
         indeces = map_point_index.astype(int).dot(self.reshape_index_m)
         indeces = indeces[indeces>=0]
         indeces = indeces[indeces<= self.map_max_index]
@@ -127,8 +130,11 @@ class SLAM(object):
         #self.map_xyz[np.where(self.map_xyz < 0)] = 0
         #self.map_xyz[np.where(self.map_xyz > 1)] = 1
 
-        
-
+    def Map_to_point_cloud(self):
+        index = np.argwhere(self.map_xyz > self.map_threshold)
+        return index * self.map_resolution_m
+      
+'''
 def listener():
     print('Hi')
     slam = SLAM(480, 640)
@@ -137,7 +143,20 @@ def listener():
 
     rospy.Subscriber("/camera/depth/image_rect_raw", Image, slam.callback)
     rospy.spin()
+'''
+def listener():
+    slam = SLAM(480, 640)
+    rospy.init_node('listener', anonymous=True)
+    depth_camera = message_filters.Subscriber("/camera/depth/image_rect_raw", Image)
+    gyr_sub = message_filters.Subscriber("/camera/gyro/sample", Imu)
+    acc_sub = message_filters.Subscriber("/camera/accel/sample", Imu)
 
+    # using approximate synchronizer. 
+    ts = message_filters.ApproximateTimeSynchronizer([depth_camera, gyr_sub, acc_sub], 1, 0.3, allow_headerless=False)
+    ts.registerCallback(slam.callback)
+
+
+    rospy.spin()
 
 if __name__ == '__main__':
 
