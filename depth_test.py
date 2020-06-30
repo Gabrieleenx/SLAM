@@ -13,6 +13,7 @@ import sys
 #np.set_printoptions(threshold=sys.maxsize)
 class SLAM(object):
     def __init__(self, height, width):
+        # camera
         self.dist_y_img = np.zeros((height, width), dtype=np.uint16) # y = deapth, x = horizontal, z = vertical...
         self.dist_x_img = np.zeros((height, width), dtype=int)
         self.dist_z_img = np.zeros((height, width), dtype=int)
@@ -22,6 +23,21 @@ class SLAM(object):
         self.focal_point = 385.0
         self.horizontal_distance = np.reshape(np.arange(640)-320, (1, 640)) / self.focal_point
         self.vertical_distance = np.reshape(np.arange(480)-240, (480, 1)) / self.focal_point
+        #map
+        self.map_x = 10
+        self.map_y = 10
+        self.map_z = 6
+        self.map_resolution_m = 0.05 # 0.05 m resolution
+        self.map_xyz = np.zeros((int(self.map_x//self.map_resolution_m), int(self.map_y//self.map_resolution_m), int(self.map_z//self.map_resolution_m)))
+
+        self.reshape_index_m = np.array([int(self.map_y//self.map_resolution_m) * int(self.map_z//self.map_resolution_m), 
+                                        int(self.map_z//self.map_resolution_m), 1])
+        self.map_max_index =int(self.map_x//self.map_resolution_m) * int(self.map_y//self.map_resolution_m) * int(self.map_z//self.map_resolution_m) -1
+        # rotation and position
+        self.euler_zyx = np.array([[0.0], [0.0], [0.0]])
+        self.pos_xyz = np.array([[self.map_x], [self.map_y], [self.map_z]])/(2)
+
+        # publish
         self.pub = rospy.Publisher('/PointCloud', PointCloud, queue_size=1)
 
 
@@ -37,8 +53,8 @@ class SLAM(object):
         self.dist_z_img = np.multiply(self.dist_y_img, self.vertical_distance)
         self.cloudpoints = self.img_to_cloudpoints()
 
-        T_cloud = self.Rotate_zyx_Translate_points(Rz=0, Ry=0, Rx=0, Tx=0, Ty=0, Tz=0)
-
+        T_cloud = self.Rotate_zyx_Translate_points(Rz=0, Ry=0, Rx=0, Tx=self.pos_xyz[0, 0], Ty=self.pos_xyz[1, 0] , Tz=self.pos_xyz[2, 0])
+        self.add_points_to_map(T_cloud)
         # will be on its own therad in future...
         self.Publich_PointCloud(T_cloud)
 
@@ -95,7 +111,23 @@ class SLAM(object):
 
         return new_points
 
+    def add_points_to_map(self, T_cloud):
+        #faster
+        map_point_index = T_cloud/self.map_resolution_m
+        self.map_xyz += -0.05        
+        indeces = map_point_index.astype(int).dot(self.reshape_index_m)
+        indeces = indeces[indeces>=0]
+        indeces = indeces[indeces<= self.map_max_index]
+        np.add.at(self.map_xyz.reshape(-1), indeces, 0.1)
+        self.map_xyz = np.clip(self.map_xyz, 0, 1)
 
+        # too slow, need a faster method...      
+        #for i in range(indeces.shape[1]):
+        #    self.map_xyz[indeces[0, i],indeces[1, i],indeces[2, i]] += 0.1
+        #self.map_xyz[np.where(self.map_xyz < 0)] = 0
+        #self.map_xyz[np.where(self.map_xyz > 1)] = 1
+
+        
 
 def listener():
     print('Hi')
