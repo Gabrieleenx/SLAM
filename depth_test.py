@@ -8,6 +8,7 @@ import message_filters
 import numpy as np
 from struct import *
 import sys
+import random
 from orientation_estimate import Orientation_estimate
 
 #np.set_printoptions(threshold=sys.maxsize)
@@ -24,21 +25,22 @@ class SLAM(object):
         self.horizontal_distance = np.reshape(np.arange(640)-320, (1, 640)) / self.focal_point
         self.vertical_distance = -1*np.reshape(np.arange(480)-240, (480, 1)) / self.focal_point
         #map
-        self.map_x = 10
-        self.map_y = 10
+        self.map_x = 16
+        self.map_y = 16
         self.map_z = 6
         self.map_resolution_m = 0.05 # 0.05 m resolution
         self.map_xyz = np.zeros((int(self.map_x//self.map_resolution_m), int(self.map_y//self.map_resolution_m), int(self.map_z//self.map_resolution_m)))
         self.reshape_index_m = np.array([int(self.map_y//self.map_resolution_m) * int(self.map_z//self.map_resolution_m), 
                                         int(self.map_z//self.map_resolution_m), 1])
         self.map_max_index =int(self.map_x//self.map_resolution_m) * int(self.map_y//self.map_resolution_m) * int(self.map_z//self.map_resolution_m) -1
-        self.map_threshold = 0.5
+        self.map_threshold = 0.8
+        self.n_remove = 1000
         # rotation and position
         self.euler_zyx = np.array([[0.0], [0.0], [0.0]])
         self.pos_xyz = np.array([[self.map_x], [self.map_y], [self.map_z]])/(2)
         self.oritentaion = Orientation_estimate()
         # publish
-        self.pub = rospy.Publisher('/PointCloud', PointCloud, queue_size=1)
+        self.pub = rospy.Publisher('/PointCloud', PointCloud, queue_size=3)
 
 
     def callback(self, data, gyr_data, acc_data):
@@ -52,9 +54,9 @@ class SLAM(object):
         self.dist_x_img = np.multiply(self.dist_y_img, self.horizontal_distance)
         self.dist_z_img = np.multiply(self.dist_y_img, self.vertical_distance)
         self.cloudpoints = self.img_to_cloudpoints()
-
         self.euler_zyx = self.oritentaion.callback(gyr_data, acc_data)
-        print(self.euler_zyx)
+        #print(self.euler_zyx)
+        print('FPS = ', 1/self.oritentaion.delta_T)
         T_cloud = self.Rotate_zyx_Translate_points(Rz=self.euler_zyx[0,0], Ry=self.euler_zyx[1,0], Rx=self.euler_zyx[2,0], Tx=self.pos_xyz[0, 0], Ty=self.pos_xyz[1, 0] , Tz=self.pos_xyz[2, 0])
         self.add_points_to_map(T_cloud)
         # will be on its own therad in future...
@@ -117,11 +119,15 @@ class SLAM(object):
     def add_points_to_map(self, T_cloud):
         #faster, need further implementations
         map_point_index = T_cloud/self.map_resolution_m
-        self.map_xyz += -0.0005 # will be removed and replaced by something more sophisticated       
+        remove_index = self.remove_old_points(T_cloud).astype(int).dot(self.reshape_index_m)
+        remove_index = remove_index[remove_index>=0]
+        remove_index = remove_index[remove_index <= self.map_max_index]
+        np.add.at(self.map_xyz.reshape(-1), remove_index, -0.2)
+        #self.map_xyz += -0.0005 # will be removed and replaced by something more sophisticated       
         indeces = map_point_index.astype(int).dot(self.reshape_index_m)
         indeces = indeces[indeces>=0]
-        indeces = indeces[indeces<= self.map_max_index]
-        np.add.at(self.map_xyz.reshape(-1), indeces, 0.1)
+        indeces = indeces[indeces <= self.map_max_index]
+        np.add.at(self.map_xyz.reshape(-1), indeces, 0.4)
         self.map_xyz = np.clip(self.map_xyz, 0, 1)
 
         # too slow, need a faster method...      
@@ -130,6 +136,22 @@ class SLAM(object):
         #self.map_xyz[np.where(self.map_xyz < 0)] = 0
         #self.map_xyz[np.where(self.map_xyz > 1)] = 1
 
+    def remove_old_points(self, T_cloud):
+        rand_index = random.sample(range(0, T_cloud.shape[0]), self.n_remove)
+        rand_map_pos = T_cloud[rand_index] 
+        delta = rand_map_pos - self.pos_xyz.transpose()[0]
+        dist = np.linalg.norm(delta, axis=1)
+        n_points = dist/self.map_resolution_m
+        n_points = n_points.astype(int)
+        total_sum_points = n_points.sum() # + 26*self.n_remove # too be added
+        remove_indeces = np.zeros((total_sum_points, 3))
+        pos = self.pos_xyz.transpose()[0]
+        last_point = 0
+        for i in range(self.n_remove):
+            remove_indeces[last_point:last_point+n_points[i],:] = np.linspace(pos, rand_map_pos[i], n_points[i])
+            last_point += n_points[i]
+        return remove_indeces/self.map_resolution_m
+        
     def Map_to_point_cloud(self):
         index = np.argwhere(self.map_xyz > self.map_threshold)
         return index * self.map_resolution_m
@@ -152,7 +174,7 @@ def listener():
     acc_sub = message_filters.Subscriber("/camera/accel/sample", Imu)
 
     # using approximate synchronizer. 
-    ts = message_filters.ApproximateTimeSynchronizer([depth_camera, gyr_sub, acc_sub], 1, 0.3, allow_headerless=False)
+    ts = message_filters.ApproximateTimeSynchronizer([depth_camera, gyr_sub, acc_sub], 1, 0.5, allow_headerless=False)
     ts.registerCallback(slam.callback)
 
 

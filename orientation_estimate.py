@@ -24,6 +24,8 @@ class Orientation_estimate(object):
 		self.cov_gyro = (0.0001) *np.array([[0.6, -0.15, -0.03],[-0.15, 0.6, 0.05],[-0.03, 0.05, 0.6]])
 		self.grav = np.array([[0],[0],[9.81]])
 		self.cov_acc = np.array([[0.0001, 0.0, 0.0],[0.0, 0.0001, -0.001],[0.0, -0.0001, 0.0015]])
+		self.delta_T = 0.1
+
 	def callback(self, gyr_data, acc_data):
 
 		gyro = np.array([[gyr_data.angular_velocity.x],[gyr_data.angular_velocity.z],[-gyr_data.angular_velocity.y]])
@@ -36,7 +38,7 @@ class Orientation_estimate(object):
 		else:
 			delta_time = time - self.last_time
 			self.last_time = time
-
+			self.delta_T = delta_time
 		# something wrong in the acc update :(
 		self.quaternions, self.P = orientation_prediction(self.quaternions, self.P, delta_time, gyro, self.correction_gyro, self.cov_gyro)
 		self.quaternions = normalize_quat(self.quaternions)
