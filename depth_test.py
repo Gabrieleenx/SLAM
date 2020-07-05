@@ -44,7 +44,7 @@ class SLAM(object):
 
 
     def callback(self, data, gyr_data, acc_data):
-        print('thats up')
+        
         # convert byte data to numpy 2d array
         k = np.frombuffer(data.data, dtype=np.uint16)
         self.dist_y_img = k.reshape((self.height, self.width))
@@ -55,9 +55,10 @@ class SLAM(object):
         self.dist_z_img = np.multiply(self.dist_y_img, self.vertical_distance)
         self.cloudpoints = self.img_to_cloudpoints()
         self.euler_zyx = self.oritentaion.callback(gyr_data, acc_data)
+        self.localization()
         #print(self.euler_zyx)
         print('FPS = ', 1/self.oritentaion.delta_T)
-        T_cloud = self.Rotate_zyx_Translate_points(Rz=self.euler_zyx[0,0], Ry=self.euler_zyx[1,0], Rx=self.euler_zyx[2,0], Tx=self.pos_xyz[0, 0], Ty=self.pos_xyz[1, 0] , Tz=self.pos_xyz[2, 0])
+        T_cloud = self.Rotate_zyx_Translate_points(Rz=self.euler_zyx[0,0], Ry=self.euler_zyx[1,0], Rx=self.euler_zyx[2,0], Tx=self.pos_xyz[0, 0], Ty=self.pos_xyz[1, 0] , Tz=self.pos_xyz[2, 0], cloudpoints=self.cloudpoints)
         self.add_points_to_map(T_cloud)
         # will be on its own therad in future...
         Map_point_cloud = self.Map_to_point_cloud()
@@ -86,7 +87,7 @@ class SLAM(object):
             # Rviz vizualization is retarded, -y,z,x instead of xyz!! might be bug in Rviz for pointcloud. 
         self.pub.publish(cloud_msg)
 
-    def Rotate_zyx_Translate_points(self, Rz, Ry, Rx, Tx, Ty, Tz):
+    def Rotate_zyx_Translate_points(self, Rz, Ry, Rx, Tx, Ty, Tz, cloudpoints):
         RotM_z = np.array([[np.cos(Rz), -np.sin(Rz), 0],
                         [np.sin(Rz), np.cos(Rz), 0],
                         [0, 0, 1]]) 
@@ -101,10 +102,10 @@ class SLAM(object):
 
         R_zyx = RotM_z.dot(RotM_Y).dot(RotM_X)
 
-        point_size = self.cloudpoints.shape[0]
+        point_size = cloudpoints.shape[0]
 
         # So fast for rotation of a large pointcloud
-        new_points = np.einsum('ij,nj->ni', R_zyx, self.cloudpoints)
+        new_points = np.einsum('ij,nj->ni', R_zyx, cloudpoints)
 
         # Too slow ... 
         '''
@@ -151,6 +152,27 @@ class SLAM(object):
             remove_indeces[last_point:last_point+n_points[i],:] = np.linspace(pos, rand_map_pos[i], n_points[i])
             last_point += n_points[i]
         return remove_indeces/self.map_resolution_m
+
+    def localization(self):
+        rand_index = random.sample(range(0, self.cloudpoints.shape[0]), 500)
+        loc_cloud = self.cloudpoints[rand_index]
+        sum_prob = 0
+        rot_z_loc = 0
+        for i in range(int(90/3)):
+            rot_z = self.euler_zyx[0,0] + (-90/2 + 3*i)*np.pi/180
+            loc_cloud_rot = self.Rotate_zyx_Translate_points(Rz=rot_z, Ry=self.euler_zyx[1,0], Rx=self.euler_zyx[2,0], Tx=self.pos_xyz[0, 0], Ty=self.pos_xyz[1, 0] , Tz=self.pos_xyz[2, 0], cloudpoints=loc_cloud)
+            loc_cloud_rot = loc_cloud_rot/self.map_resolution_m
+            indeces = loc_cloud_rot.astype(int).dot(self.reshape_index_m)
+            indeces = indeces[indeces>=0]
+            indeces = indeces[indeces <= self.map_max_index]
+            #print(np.sum(self.map_xyz.reshape(-1)[indeces]))
+            if np.sum(self.map_xyz.reshape(-1)[indeces]) > sum_prob:
+                sum_prob = np.sum(self.map_xyz.reshape(-1)[indeces])
+                #print(i, sum_prob)
+                rot_z_loc = rot_z
+        self.euler_zyx[0,0] = rot_z_loc
+        print('rot z', rot_z_loc, self.euler_zyx[0,0], sum_prob)
+
         
     def Map_to_point_cloud(self):
         index = np.argwhere(self.map_xyz > self.map_threshold)
