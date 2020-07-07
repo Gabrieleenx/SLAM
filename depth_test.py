@@ -2,7 +2,7 @@
 
 import rospy
 from sensor_msgs.msg import Image, PointCloud, Imu
-from geometry_msgs.msg import Point32, Quaternion
+from geometry_msgs.msg import Point32, Quaternion, Pose, PoseStamped
 import std_msgs.msg
 import message_filters
 import numpy as np
@@ -33,15 +33,18 @@ class SLAM(object):
         self.reshape_index_m = np.array([int(self.map_y//self.map_resolution_m) * int(self.map_z//self.map_resolution_m), 
                                         int(self.map_z//self.map_resolution_m), 1])
         self.map_max_index =int(self.map_x//self.map_resolution_m) * int(self.map_y//self.map_resolution_m) * int(self.map_z//self.map_resolution_m) -1
-        self.map_threshold = 0.8
+        self.map_threshold = 0.4
         self.n_remove = 1000
+        self.no_map = 1
+        self.uncertain = 0
         # rotation and position
         self.euler_zyx = np.array([[0.0], [0.0], [0.0]])
         self.pos_xyz = np.array([[self.map_x], [self.map_y], [self.map_z]])/(2)
         self.oritentaion = Orientation_estimate()
+        self.loc_certainty = 0.0
         # publish
         self.pub = rospy.Publisher('/PointCloud', PointCloud, queue_size=3)
-
+        self.pub_pose = rospy.Publisher('/Pose', PoseStamped, queue_size=3)
 
     def callback(self, data, gyr_data, acc_data):
         
@@ -55,14 +58,18 @@ class SLAM(object):
         self.dist_z_img = np.multiply(self.dist_y_img, self.vertical_distance)
         self.cloudpoints = self.img_to_cloudpoints()
         self.euler_zyx = self.oritentaion.callback(gyr_data, acc_data)
+        
         self.localization()
         #print(self.euler_zyx)
-        print('FPS = ', 1/self.oritentaion.delta_T)
-        T_cloud = self.Rotate_zyx_Translate_points(Rz=self.euler_zyx[0,0], Ry=self.euler_zyx[1,0], Rx=self.euler_zyx[2,0], Tx=self.pos_xyz[0, 0], Ty=self.pos_xyz[1, 0] , Tz=self.pos_xyz[2, 0], cloudpoints=self.cloudpoints)
+        print('FPS = ', self.oritentaion.delta_T)
+        T_cloud = self.Rotate_zyx_Translate_points(Rz=self.euler_zyx[0,0], Ry=self.euler_zyx[1,0],
+            Rx=self.euler_zyx[2,0], Tx=self.pos_xyz[0, 0], Ty=self.pos_xyz[1, 0],
+            Tz=self.pos_xyz[2, 0], cloudpoints=self.cloudpoints)
         self.add_points_to_map(T_cloud)
         # will be on its own therad in future...
         Map_point_cloud = self.Map_to_point_cloud()
         self.Publich_PointCloud(Map_point_cloud)
+        self.Publish_Pose()
 
     def img_to_cloudpoints(self):
         cloudpoints = np.zeros((self.height*self.width, 3))
@@ -83,8 +90,8 @@ class SLAM(object):
         # want a faster method for convertion to array of Point32. 
         for i in range(cloudpoints.shape[0]//10):
             j = i*10
-            cloud_msg.points.append(Point32(-cloudpoints[j, 1], -cloudpoints[j, 2], cloudpoints[j, 0])) 
-            # Rviz vizualization is retarded, -y,z,x instead of xyz!! might be bug in Rviz for pointcloud. 
+            cloud_msg.points.append(Point32(cloudpoints[j, 0], -cloudpoints[j, 2], cloudpoints[j, 1])) 
+            # Change to camera frame
         self.pub.publish(cloud_msg)
 
     def Rotate_zyx_Translate_points(self, Rz, Ry, Rx, Tx, Ty, Tz, cloudpoints):
@@ -117,19 +124,52 @@ class SLAM(object):
 
         return new_points
 
+    def Rotate_zyx(self, Rz, Ry, Rx, cloudpoints):
+        RotM_z = np.array([[np.cos(Rz), -np.sin(Rz), 0],
+                        [np.sin(Rz), np.cos(Rz), 0],
+                        [0, 0, 1]]) 
+        
+        RotM_Y = np.array([[np.cos(Ry), 0, np.sin(Ry)],
+                        [0, 1, 0],
+                        [-np.sin(Ry), 0, np.cos(Ry)]]) 
+
+        RotM_X = np.array([[1, 0, 0],
+                        [0, np.cos(Rx), -np.sin(Rx)],
+                        [0, np.sin(Rx), np.cos(Rx)]]) 
+
+        R_zyx = RotM_z.dot(RotM_Y).dot(RotM_X)
+
+        point_size = cloudpoints.shape[0]
+
+        # So fast for rotation of a large pointcloud
+        new_points = np.einsum('ij,nj->ni', R_zyx, cloudpoints)
+
+        return new_points
+
+    def Translate_points(self, Tx, Ty, Tz, cloudpoints):
+        cloudpoints_ = cloudpoints + np.array([Tx, Ty, Tz])
+        return cloudpoints_
+
+
     def add_points_to_map(self, T_cloud):
         #faster, need further implementations
-        map_point_index = T_cloud/self.map_resolution_m
-        remove_index = self.remove_old_points(T_cloud).astype(int).dot(self.reshape_index_m)
-        remove_index = remove_index[remove_index>=0]
-        remove_index = remove_index[remove_index <= self.map_max_index]
-        np.add.at(self.map_xyz.reshape(-1), remove_index, -0.2)
-        #self.map_xyz += -0.0005 # will be removed and replaced by something more sophisticated       
-        indeces = map_point_index.astype(int).dot(self.reshape_index_m)
-        indeces = indeces[indeces>=0]
-        indeces = indeces[indeces <= self.map_max_index]
-        np.add.at(self.map_xyz.reshape(-1), indeces, 0.4)
-        self.map_xyz = np.clip(self.map_xyz, 0, 1)
+        if self.loc_certainty >= 0.8:
+            self.no_map = 0
+        if self.loc_certainty >= 0.7 or self.no_map:
+            map_point_index = T_cloud/self.map_resolution_m
+            remove_index = self.remove_old_points(T_cloud).astype(int).dot(self.reshape_index_m)
+            remove_index = remove_index[remove_index>=0]
+            remove_index = remove_index[remove_index <= self.map_max_index]
+            np.add.at(self.map_xyz.reshape(-1), remove_index, -0.03)
+            #self.map_xyz += -0.0005 # will be removed and replaced by something more sophisticated       
+            indeces = map_point_index.astype(int).dot(self.reshape_index_m)
+            indeces = indeces[indeces>=0]
+            indeces = indeces[indeces <= self.map_max_index]
+            np.add.at(self.map_xyz.reshape(-1), indeces, 0.005)
+            self.map_xyz = np.clip(self.map_xyz, 0, 1)
+        else:
+            self.uncertain = 1
+            print('uncertain location')
 
         # too slow, need a faster method...      
         #for i in range(indeces.shape[1]):
@@ -154,29 +194,97 @@ class SLAM(object):
         return remove_indeces/self.map_resolution_m
 
     def localization(self):
-        rand_index = random.sample(range(0, self.cloudpoints.shape[0]), 500)
-        loc_cloud = self.cloudpoints[rand_index]
+        num_points = 300
         sum_prob = 0
+
+        rand_index = random.sample(range(0, self.cloudpoints.shape[0]), num_points)
+        loc_cloud = self.cloudpoints[rand_index]
         rot_z_loc = 0
-        for i in range(int(90/3)):
-            rot_z = self.euler_zyx[0,0] + (-90/2 + 3*i)*np.pi/180
-            loc_cloud_rot = self.Rotate_zyx_Translate_points(Rz=rot_z, Ry=self.euler_zyx[1,0], Rx=self.euler_zyx[2,0], Tx=self.pos_xyz[0, 0], Ty=self.pos_xyz[1, 0] , Tz=self.pos_xyz[2, 0], cloudpoints=loc_cloud)
+        Tx_loc = 8
+        Ty_loc = 8
+        Tz_loc = 3
+        length = 0.25
+        rotation_view = 60
+        if self.uncertain: # not working too well 
+            rotation_view = 120
+
+        n_steps = int(length / self.map_resolution_m)
+        for i in range(int(rotation_view/3)):
+            rot_z = self.euler_zyx[0,0] + (-rotation_view/2 + 3*i)*np.pi/180
+            cloud_rot = self.Rotate_zyx(Rz=rot_z, Ry=self.euler_zyx[1,0],
+                        Rx=self.euler_zyx[2,0], cloudpoints=loc_cloud)
+            '''
+            loc_cloud_rot = self.Translate_points(Tx=8, Ty=8, Tz=3, cloudpoints=cloud_rot)
             loc_cloud_rot = loc_cloud_rot/self.map_resolution_m
             indeces = loc_cloud_rot.astype(int).dot(self.reshape_index_m)
             indeces = indeces[indeces>=0]
             indeces = indeces[indeces <= self.map_max_index]
-            #print(np.sum(self.map_xyz.reshape(-1)[indeces]))
             if np.sum(self.map_xyz.reshape(-1)[indeces]) > sum_prob:
                 sum_prob = np.sum(self.map_xyz.reshape(-1)[indeces])
-                #print(i, sum_prob)
                 rot_z_loc = rot_z
-        self.euler_zyx[0,0] = rot_z_loc
-        print('rot z', rot_z_loc, self.euler_zyx[0,0], sum_prob)
-
+            '''                 
+            for j in range(n_steps):
+                T_x = self.pos_xyz[0, 0] + j*self.map_resolution_m - length/2
+                for k in range(n_steps):  
+                    T_y = self.pos_xyz[1, 0] + k*self.map_resolution_m - length/2
+                    for z in range(n_steps): 
+                        T_z = self.pos_xyz[2, 0] + z*self.map_resolution_m - length/2
+                        #print(T_x, T_y, T_z)
+                        loc_cloud_rot = self.Translate_points(Tx=T_x, Ty=T_y, Tz=T_z, cloudpoints=cloud_rot)
+                        loc_cloud_rot = loc_cloud_rot/self.map_resolution_m
+                        indeces = loc_cloud_rot.astype(int).dot(self.reshape_index_m)
+                        indeces = indeces[indeces>=0]
+                        indeces = indeces[indeces <= self.map_max_index]
+                        if np.sum(self.map_xyz.reshape(-1)[indeces]) > sum_prob:
+                            sum_prob = np.sum(self.map_xyz.reshape(-1)[indeces])
+                            rot_z_loc = rot_z
+                            #print('in', rot_z, T_x, T_y, T_z)
+                            Tx_loc = T_x
+                            Ty_loc = T_y
+                            Tz_loc = T_z
+        
+        self.loc_certainty = sum_prob/num_points
+        if self.loc_certainty >= 0.7 or self.no_map:
+            self.euler_zyx[0,0] = rot_z_loc
+            self.pos_xyz[0, 0] = Tx_loc
+            self.pos_xyz[1, 0] = Ty_loc
+            self.pos_xyz[2, 0] = Tz_loc
+            if self.loc_certainty >= 0.8:
+                self.oritentaion.quaternions = self.zyx_to_quat(self.euler_zyx[0,0], self.euler_zyx[1,0],self.euler_zyx[2,0])
+        print('rot z', rot_z_loc, Tx_loc, Ty_loc, Tz_loc, self.loc_certainty)
+    
+    def zyx_to_quat(self, z, y, x):
+        quat = np.array([[np.cos(x/2) * np.cos(y/2) * np.cos(z/2) + np.sin(x/2) * np.sin(y/2) * np.sin(z/2)],
+        [np.sin(x/2) * np.cos(y/2) * np.cos(z/2) - np.cos(x/2) * np.sin(y/2) * np.sin(z/2)],
+        [np.cos(x/2) * np.sin(y/2) * np.cos(z/2) + np.sin(x/2) * np.cos(y/2) * np.sin(z/2)],
+        [np.cos(x/2) * np.cos(y/2) * np.sin(z/2) - np.sin(x/2) * np.sin(y/2) * np.cos(z/2)]])
+        return quat
         
     def Map_to_point_cloud(self):
-        index = np.argwhere(self.map_xyz > self.map_threshold)
+        index = np.argwhere(self.map_xyz[:,:,:] > self.map_threshold)
+        #int(0.4*self.map_z//self.map_resolution_m):int(0.6*self.map_z//self.map_resolution_m)
         return index * self.map_resolution_m
+
+    def Publish_Pose(self):
+        quat_np = self.zyx_to_quat(0, -self.euler_zyx[0,0]-np.pi/2, 0) # only z rotation :(
+        P = Pose()
+        #P.header.frame_id = self.frame_id
+        P.orientation.w = quat_np[0,0]
+        P.orientation.x = quat_np[1,0]
+        P.orientation.y = quat_np[2,0]
+        P.orientation.z = quat_np[3,0]
+
+        P.position.x = self.pos_xyz[0, 0]
+        P.position.y = -self.pos_xyz[2, 0]
+        P.position.z = self.pos_xyz[1, 0]
+
+        msg = PoseStamped()
+        msg.header.frame_id = self.frame_id
+        msg.pose = P
+        self.pub_pose.publish(msg)
+        
+
+    
       
 '''
 def listener():
