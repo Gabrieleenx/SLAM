@@ -1,6 +1,7 @@
 #!/home/gabriel/anaconda3/bin/python
 
 import rospy
+import cv2
 from sensor_msgs.msg import Image, PointCloud, Imu
 from geometry_msgs.msg import Point32, Quaternion, Pose, PoseStamped
 import std_msgs.msg
@@ -13,7 +14,7 @@ from orientation_estimate import Orientation_estimate
 
 #np.set_printoptions(threshold=sys.maxsize)
 class SLAM(object):
-    def __init__(self, height, width):
+    def __init__(self, height, width, downsample):
         # camera
         self.dist_y_img = np.zeros((height, width), dtype=np.uint16) # y = deapth, x = horizontal, z = vertical...
         self.dist_x_img = np.zeros((height, width), dtype=int)
@@ -21,9 +22,13 @@ class SLAM(object):
         self.height = height
         self.Rz = 0
         self.width = width
+        self.downsample = downsample
+        self.d_height = int(self.height/self.downsample)
+        self.d_width = int(self.width/self.downsample)
         self.focal_point = 385.0
-        self.horizontal_distance = np.reshape(np.arange(640)-320, (1, 640)) / self.focal_point
-        self.vertical_distance = -1*np.reshape(np.arange(480)-240, (480, 1)) / self.focal_point
+        self.horizontal_distance = np.reshape(np.arange(self.d_width)-int(self.d_width/2), (1, self.d_width)) / (self.focal_point/self.downsample)
+        self.vertical_distance = -1*np.reshape(np.arange(self.d_height)-int(self.d_height/2), (self.d_height, 1)) / (self.focal_point/self.downsample)
+
         #map
         self.map_x = 16
         self.map_y = 16
@@ -50,7 +55,10 @@ class SLAM(object):
         
         # convert byte data to numpy 2d array
         k = np.frombuffer(data.data, dtype=np.uint16)
-        self.dist_y_img = k.reshape((self.height, self.width))
+        dist_y_img = k.reshape((self.height, self.width))
+
+        self.dist_y_img = cv2.resize(dist_y_img, dsize=(self.d_width, self.d_height), interpolation=cv2.INTER_CUBIC)
+       
         self.stamp = data.header.stamp
         self.frame_id = data.header.frame_id
         self.seq = data.header.seq 
@@ -58,31 +66,31 @@ class SLAM(object):
         self.dist_z_img = np.multiply(self.dist_y_img, self.vertical_distance)
         self.cloudpoints = self.img_to_cloudpoints()
         self.euler_zyx = self.oritentaion.callback(gyr_data, acc_data)
-        
         self.localization()
         #print(self.euler_zyx)
-        print('FPS = ', self.oritentaion.delta_T)
+        print('FPS = ', 1/self.oritentaion.delta_T)
         T_cloud = self.Rotate_zyx_Translate_points(Rz=self.euler_zyx[0,0], Ry=self.euler_zyx[1,0],
             Rx=self.euler_zyx[2,0], Tx=self.pos_xyz[0, 0], Ty=self.pos_xyz[1, 0],
             Tz=self.pos_xyz[2, 0], cloudpoints=self.cloudpoints)
         self.add_points_to_map(T_cloud)
         # will be on its own therad in future...
-        Map_point_cloud = self.Map_to_point_cloud()
-        self.Publich_PointCloud(Map_point_cloud)
+        #Map_point_cloud = self.Map_to_point_cloud()
+        #self.Publich_PointCloud(Map_point_cloud)
         self.Publish_Pose()
 
     def img_to_cloudpoints(self):
-        cloudpoints = np.zeros((self.height*self.width, 3))
+        cloudpoints = np.zeros((self.d_height*self.d_width, 3))
         delete_points = np.array([]) 
         xx = self.dist_x_img / 1000
         yy = self.dist_y_img / 1000
         zz = self.dist_z_img / 1000
         img = np.array([xx, yy, zz])
-        cloudpoints = img.transpose().reshape(self.height*self.width,3)
+        cloudpoints = img.transpose().reshape(self.d_height*self.d_width,3)
 
         return cloudpoints[~np.all(cloudpoints == 0, axis=1)]
 
-    def Publich_PointCloud(self, cloudpoints):
+    def Publich_PointCloud(self):
+        cloudpoints = self.Map_to_point_cloud()
         cloud_msg = PointCloud()
         cloud_msg.header.stamp = self.stamp
         cloud_msg.header.frame_id = self.frame_id
@@ -152,21 +160,19 @@ class SLAM(object):
 
 
     def add_points_to_map(self, T_cloud):
-        #faster, need further implementations
         if self.loc_certainty >= 0.8:
             self.no_map = 0
-        if self.loc_certainty >= 0.7 or self.no_map:
+        if self.loc_certainty >= 0.6 or self.no_map:
             map_point_index = T_cloud/self.map_resolution_m
             remove_index = self.remove_old_points(T_cloud).astype(int).dot(self.reshape_index_m)
             remove_index = remove_index[remove_index>=0]
             remove_index = remove_index[remove_index <= self.map_max_index]
-            np.add.at(self.map_xyz.reshape(-1), remove_index, -0.03)
-            #self.map_xyz += -0.0005 # will be removed and replaced by something more sophisticated       
+            np.add.at(self.map_xyz.reshape(-1), remove_index, -0.03*(self.downsample))
             indeces = map_point_index.astype(int).dot(self.reshape_index_m)
-            indeces = indeces[indeces>=0]
+            indeces = indeces[indeces>=0] # might exist faster methods
             indeces = indeces[indeces <= self.map_max_index]
-            np.add.at(self.map_xyz.reshape(-1), indeces, 0.005)
-            self.map_xyz = np.clip(self.map_xyz, 0, 1)
+            np.add.at(self.map_xyz.reshape(-1), indeces, 0.005*(self.downsample**2))
+            self.map_xyz.clip(0, 1, out= self.map_xyz) 
         else:
             self.uncertain = 1
             print('uncertain location')
@@ -204,7 +210,8 @@ class SLAM(object):
         Ty_loc = 8
         Tz_loc = 3
         length = 0.25
-        rotation_view = 60
+        rotation_view = 40
+        map_conv = 1/self.map_resolution_m
         if self.uncertain: # not working too well 
             rotation_view = 120
 
@@ -231,7 +238,7 @@ class SLAM(object):
                         T_z = self.pos_xyz[2, 0] + z*self.map_resolution_m - length/2
                         #print(T_x, T_y, T_z)
                         loc_cloud_rot = self.Translate_points(Tx=T_x, Ty=T_y, Tz=T_z, cloudpoints=cloud_rot)
-                        loc_cloud_rot = loc_cloud_rot/self.map_resolution_m
+                        loc_cloud_rot = loc_cloud_rot*map_conv
                         indeces = loc_cloud_rot.astype(int).dot(self.reshape_index_m)
                         indeces = indeces[indeces>=0]
                         indeces = indeces[indeces <= self.map_max_index]
@@ -244,12 +251,12 @@ class SLAM(object):
                             Tz_loc = T_z
         
         self.loc_certainty = sum_prob/num_points
-        if self.loc_certainty >= 0.7 or self.no_map:
+        if self.loc_certainty >= 0.6 or self.no_map:
             self.euler_zyx[0,0] = rot_z_loc
             self.pos_xyz[0, 0] = Tx_loc
             self.pos_xyz[1, 0] = Ty_loc
             self.pos_xyz[2, 0] = Tz_loc
-            if self.loc_certainty >= 0.8:
+            if self.loc_certainty >= 0.75:
                 self.oritentaion.quaternions = self.zyx_to_quat(self.euler_zyx[0,0], self.euler_zyx[1,0],self.euler_zyx[2,0])
         print('rot z', rot_z_loc, Tx_loc, Ty_loc, Tz_loc, self.loc_certainty)
     
@@ -297,18 +304,20 @@ def listener():
     rospy.spin()
 '''
 def listener():
-    slam = SLAM(480, 640)
+    slam = SLAM(480, 640, 2) # height, widht, downsample
     rospy.init_node('listener', anonymous=True)
     depth_camera = message_filters.Subscriber("/camera/depth/image_rect_raw", Image)
     gyr_sub = message_filters.Subscriber("/camera/gyro/sample", Imu)
     acc_sub = message_filters.Subscriber("/camera/accel/sample", Imu)
 
     # using approximate synchronizer. 
-    ts = message_filters.ApproximateTimeSynchronizer([depth_camera, gyr_sub, acc_sub], 1, 0.5, allow_headerless=False)
+    ts = message_filters.ApproximateTimeSynchronizer([depth_camera, gyr_sub, acc_sub], 1, 0.2, allow_headerless=False)
     ts.registerCallback(slam.callback)
+    while not rospy.is_shutdown():
+        slam.Publich_PointCloud()
+        rospy.sleep(2)
 
-
-    rospy.spin()
+    #rospy.spin()
 
 if __name__ == '__main__':
 
