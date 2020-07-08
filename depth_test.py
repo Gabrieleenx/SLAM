@@ -34,11 +34,11 @@ class SLAM(object):
         self.map_y = 16
         self.map_z = 6
         self.map_resolution_m = 0.05 # 0.05 m resolution
-        self.map_xyz = np.zeros((int(self.map_x//self.map_resolution_m), int(self.map_y//self.map_resolution_m), int(self.map_z//self.map_resolution_m)))
+        self.map_xyz = np.zeros((int(self.map_x//self.map_resolution_m), int(self.map_y//self.map_resolution_m), int(self.map_z//self.map_resolution_m)), dtype=np.int16)
         self.reshape_index_m = np.array([int(self.map_y//self.map_resolution_m) * int(self.map_z//self.map_resolution_m), 
                                         int(self.map_z//self.map_resolution_m), 1])
         self.map_max_index =int(self.map_x//self.map_resolution_m) * int(self.map_y//self.map_resolution_m) * int(self.map_z//self.map_resolution_m) -1
-        self.map_threshold = 0.4
+        self.map_threshold = 100 #0.4
         self.n_remove = 1000
         self.no_map = 1
         self.uncertain = 0
@@ -163,16 +163,18 @@ class SLAM(object):
         if self.loc_certainty >= 0.8:
             self.no_map = 0
         if self.loc_certainty >= 0.6 or self.no_map:
+            self.uncertain = 0
             map_point_index = T_cloud/self.map_resolution_m
             remove_index = self.remove_old_points(T_cloud).astype(int).dot(self.reshape_index_m)
             remove_index = remove_index[remove_index>=0]
             remove_index = remove_index[remove_index <= self.map_max_index]
-            np.add.at(self.map_xyz.reshape(-1), remove_index, -0.03*(self.downsample))
+            np.add.at(self.map_xyz.reshape(-1), remove_index, int(-7*(self.downsample)))
             indeces = map_point_index.astype(int).dot(self.reshape_index_m)
             indeces = indeces[indeces>=0] # might exist faster methods
             indeces = indeces[indeces <= self.map_max_index]
-            np.add.at(self.map_xyz.reshape(-1), indeces, 0.005*(self.downsample**2))
-            self.map_xyz.clip(0, 1, out= self.map_xyz) 
+            np.add.at(self.map_xyz.reshape(-1), indeces, int(1.5*(self.downsample**2)))
+            self.map_xyz.clip(0, 300, out= self.map_xyz) 
+            #self.map_xyz.reshape(-1)[indeces] = self.map_xyz.reshape(-1)[indeces].clip(0,1)
         else:
             self.uncertain = 1
             print('uncertain location')
@@ -214,6 +216,7 @@ class SLAM(object):
         map_conv = 1/self.map_resolution_m
         if self.uncertain: # not working too well 
             rotation_view = 120
+            length = 0.5
 
         n_steps = int(length / self.map_resolution_m)
         for i in range(int(rotation_view/3)):
@@ -250,14 +253,14 @@ class SLAM(object):
                             Ty_loc = T_y
                             Tz_loc = T_z
         
-        self.loc_certainty = sum_prob/num_points
-        if self.loc_certainty >= 0.6 or self.no_map:
-            self.euler_zyx[0,0] = rot_z_loc
-            self.pos_xyz[0, 0] = Tx_loc
-            self.pos_xyz[1, 0] = Ty_loc
-            self.pos_xyz[2, 0] = Tz_loc
-            if self.loc_certainty >= 0.75:
-                self.oritentaion.quaternions = self.zyx_to_quat(self.euler_zyx[0,0], self.euler_zyx[1,0],self.euler_zyx[2,0])
+        self.loc_certainty = (sum_prob/300)/num_points
+        #if self.loc_certainty >= 0.6 or self.no_map:
+        self.euler_zyx[0,0] = rot_z_loc
+        self.pos_xyz[0, 0] = Tx_loc
+        self.pos_xyz[1, 0] = Ty_loc
+        self.pos_xyz[2, 0] = Tz_loc
+        if self.loc_certainty >= 0.75:
+            self.oritentaion.quaternions = self.zyx_to_quat(self.euler_zyx[0,0], self.euler_zyx[1,0],self.euler_zyx[2,0])
         print('rot z', rot_z_loc, Tx_loc, Ty_loc, Tz_loc, self.loc_certainty)
     
     def zyx_to_quat(self, z, y, x):
