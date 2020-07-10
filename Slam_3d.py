@@ -50,6 +50,8 @@ class SLAM(object):
         # publish
         self.pub = rospy.Publisher('/PointCloud', PointCloud, queue_size=3)
         self.pub_pose = rospy.Publisher('/Pose', PoseStamped, queue_size=3)
+        
+        self.fps_list = np.array([])
 
     def callback(self, data, gyr_data, acc_data):
         
@@ -68,7 +70,8 @@ class SLAM(object):
         self.euler_zyx = self.oritentaion.callback(gyr_data, acc_data)
         self.localization()
         #print(self.euler_zyx)
-        print('FPS = ', 1/self.oritentaion.delta_T)
+        self.fps_list = np.append(self.fps_list, [self.oritentaion.delta_T])
+        print('FPS = ', 1/self.oritentaion.delta_T, 1/np.mean(self.fps_list))
         T_cloud = self.Rotate_zyx_Translate_points(Rz=self.euler_zyx[0,0], Ry=self.euler_zyx[1,0],
             Rx=self.euler_zyx[2,0], Tx=self.pos_xyz[0, 0], Ty=self.pos_xyz[1, 0],
             Tz=self.pos_xyz[2, 0], cloudpoints=self.cloudpoints)
@@ -96,8 +99,8 @@ class SLAM(object):
         cloud_msg.header.frame_id = self.frame_id
         cloud_msg.header.seq = self.seq
         # want a faster method for convertion to array of Point32. 
-        for i in range(cloudpoints.shape[0]//10):
-            j = i*10
+        for i in range(cloudpoints.shape[0]//2):
+            j = i*2
             cloud_msg.points.append(Point32(cloudpoints[j, 0], -cloudpoints[j, 2], cloudpoints[j, 1])) 
             # Change to camera frame
         self.pub.publish(cloud_msg)
@@ -168,13 +171,13 @@ class SLAM(object):
             remove_index = self.remove_old_points(T_cloud).astype(int).dot(self.reshape_index_m)
             remove_index = remove_index[remove_index>=0]
             remove_index = remove_index[remove_index <= self.map_max_index]
-            np.add.at(self.map_xyz.reshape(-1), remove_index, int(-7*(self.downsample)))
+            np.add.at(self.map_xyz.reshape(-1), remove_index, int(-10*(self.downsample)))
             indeces = map_point_index.astype(int).dot(self.reshape_index_m)
             indeces = indeces[indeces>=0] # might exist faster methods
             indeces = indeces[indeces <= self.map_max_index]
-            np.add.at(self.map_xyz.reshape(-1), indeces, int(1.5*(self.downsample**2)))
-            self.map_xyz.clip(0, 300, out= self.map_xyz) 
-            #self.map_xyz.reshape(-1)[indeces] = self.map_xyz.reshape(-1)[indeces].clip(0,1)
+            np.add.at(self.map_xyz.reshape(-1), indeces, int(1.6*(self.downsample**2)))
+            #self.map_xyz.clip(0, 300, out= self.map_xyz) 
+            self.map_xyz.reshape(-1)[indeces] = self.map_xyz.reshape(-1)[indeces].clip(0,300)
         else:
             self.uncertain = 1
             print('uncertain location')
@@ -187,9 +190,10 @@ class SLAM(object):
 
     def remove_old_points(self, T_cloud):
         rand_index = random.sample(range(0, T_cloud.shape[0]), self.n_remove)
-        rand_map_pos = T_cloud[rand_index] 
-        delta = rand_map_pos - self.pos_xyz.transpose()[0]
+        delta =  T_cloud[rand_index] - self.pos_xyz.transpose()[0]
         dist = np.linalg.norm(delta, axis=1)
+        dist =dist*1.08
+        rand_map_pos = delta + self.pos_xyz.transpose()[0]
         n_points = dist/self.map_resolution_m
         n_points = n_points.astype(int)
         total_sum_points = n_points.sum() # + 26*self.n_remove # too be added
@@ -202,9 +206,8 @@ class SLAM(object):
         return remove_indeces/self.map_resolution_m
 
     def localization(self):
-        num_points = 300
+        num_points = 500
         sum_prob = 0
-
         rand_index = random.sample(range(0, self.cloudpoints.shape[0]), num_points)
         loc_cloud = self.cloudpoints[rand_index]
         rot_z_loc = 0
@@ -223,16 +226,7 @@ class SLAM(object):
             rot_z = self.euler_zyx[0,0] + (-rotation_view/2 + 3*i)*np.pi/180
             cloud_rot = self.Rotate_zyx(Rz=rot_z, Ry=self.euler_zyx[1,0],
                         Rx=self.euler_zyx[2,0], cloudpoints=loc_cloud)
-            '''
-            loc_cloud_rot = self.Translate_points(Tx=8, Ty=8, Tz=3, cloudpoints=cloud_rot)
-            loc_cloud_rot = loc_cloud_rot/self.map_resolution_m
-            indeces = loc_cloud_rot.astype(int).dot(self.reshape_index_m)
-            indeces = indeces[indeces>=0]
-            indeces = indeces[indeces <= self.map_max_index]
-            if np.sum(self.map_xyz.reshape(-1)[indeces]) > sum_prob:
-                sum_prob = np.sum(self.map_xyz.reshape(-1)[indeces])
-                rot_z_loc = rot_z
-            '''                 
+                        
             for j in range(n_steps):
                 T_x = self.pos_xyz[0, 0] + j*self.map_resolution_m - length/2
                 for k in range(n_steps):  
@@ -245,13 +239,16 @@ class SLAM(object):
                         indeces = loc_cloud_rot.astype(int).dot(self.reshape_index_m)
                         indeces = indeces[indeces>=0]
                         indeces = indeces[indeces <= self.map_max_index]
-                        if np.sum(self.map_xyz.reshape(-1)[indeces]) > sum_prob:
-                            sum_prob = np.sum(self.map_xyz.reshape(-1)[indeces])
+                        sum_ = np.sum(self.map_xyz.reshape(-1)[indeces])
+                        if sum_ > sum_prob:
+                            sum_prob = sum_
                             rot_z_loc = rot_z
                             #print('in', rot_z, T_x, T_y, T_z)
                             Tx_loc = T_x
                             Ty_loc = T_y
                             Tz_loc = T_z
+                        
+                        
         
         self.loc_certainty = (sum_prob/300)/num_points
         #if self.loc_certainty >= 0.6 or self.no_map:
