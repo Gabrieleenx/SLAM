@@ -4,6 +4,9 @@ import rospy
 import cv2
 from sensor_msgs.msg import Image, PointCloud, Imu
 from geometry_msgs.msg import Point32, Quaternion, Pose, PoseStamped
+import roslib
+from visualization_msgs.msg import Marker, MarkerArray
+
 import std_msgs.msg
 import message_filters
 import numpy as np
@@ -11,8 +14,9 @@ from struct import *
 import sys
 import random
 from orientation_estimate import Orientation_estimate
+from darknet_ros_msgs.msg import BoundingBox, BoundingBoxes
 
-#np.set_printoptions(threshold=sys.maxsize)
+np.set_printoptions(threshold=sys.maxsize)
 class SLAM(object):
     def __init__(self, height, width, downsample):
         # camera
@@ -26,9 +30,11 @@ class SLAM(object):
         self.d_height = int(self.height/self.downsample)
         self.d_width = int(self.width/self.downsample)
         self.focal_point = 385.0
+        self.rgb_focal_point = 613.0
         self.horizontal_distance = np.reshape(np.arange(self.d_width)-int(self.d_width/2), (1, self.d_width)) / (self.focal_point/self.downsample)
         self.vertical_distance = -1*np.reshape(np.arange(self.d_height)-int(self.d_height/2), (self.d_height, 1)) / (self.focal_point/self.downsample)
-
+        self.darknet_indeces = np.array([], dtype=int)
+        self.darknet_indeces_new = 0
         #map
         self.map_x = 16
         self.map_y = 16
@@ -50,7 +56,8 @@ class SLAM(object):
         # publish
         self.pub = rospy.Publisher('/PointCloud', PointCloud, queue_size=3)
         self.pub_pose = rospy.Publisher('/Pose', PoseStamped, queue_size=3)
-        
+        self.pub_people = rospy.Publisher('/People', MarkerArray, queue_size=3)
+        # Fps
         self.fps_list = np.array([])
 
     def callback(self, data, gyr_data, acc_data):
@@ -59,8 +66,15 @@ class SLAM(object):
         k = np.frombuffer(data.data, dtype=np.uint16)
         dist_y_img = k.reshape((self.height, self.width))
 
-        self.dist_y_img = cv2.resize(dist_y_img, dsize=(self.d_width, self.d_height), interpolation=cv2.INTER_CUBIC)
-       
+        self.dist_y_img_copy = cv2.resize(dist_y_img, dsize=(self.d_width, self.d_height), interpolation=cv2.INTER_CUBIC)
+        self.dist_y_img = np.copy(self.dist_y_img_copy)
+        #darknet_indeces = self.Darknet_indeces(Darknet_box.bounding_boxes)
+        if self.darknet_indeces_new:
+            #print('before -----------------------------', self.dist_y_img[100])
+            #self.dist_y_img.put(self.darknet_indeces, 0)
+            self.dist_y_img[self.darknet_indeces[0], self.darknet_indeces[1]] = 0
+            #print('after ------------', self.dist_y_img[100])
+            #print('index', self.darknet_indeces)
         self.stamp = data.header.stamp
         self.frame_id = data.header.frame_id
         self.seq = data.header.seq 
@@ -290,7 +304,63 @@ class SLAM(object):
         msg.pose = P
         self.pub_pose.publish(msg)
         
+    def Darknet_indeces(self, data):
+        boxes = data.bounding_boxes
+        ind_y = np.array([], dtype=int)
+        ind_x = np.array([], dtype=int)
+        msg = MarkerArray()
+        for box in boxes:
+            x_min = int((box.xmin - self.width/2) * (self.focal_point/self.rgb_focal_point) / self.downsample + self.d_width/2)
+            x_max = int((box.xmax - self.width/2) * (self.focal_point/self.rgb_focal_point) / self.downsample + self.d_width/2)
 
+            y_min = int((box.ymin - self.height/2) * (self.focal_point/self.rgb_focal_point) / self.downsample + self.d_height/2)
+            y_max = int((box.ymax - self.height/2) * (self.focal_point/self.rgb_focal_point) / self.downsample + self.d_height/2)
+
+            xlist = np.linspace(x_min, x_max, (x_max-x_min), dtype=int)
+            ylist = np.linspace(y_min, y_max, (y_max-y_min), dtype=int)
+
+            x_list = np.tile(xlist, (y_max-y_min))
+            y_list = np.repeat(ylist, (x_max-x_min))
+            ind_x = np.append(ind_x, x_list)
+            ind_y = np.append(ind_y, y_list)
+
+            #print(x_list)
+
+            dist = np.mean(self.dist_y_img_copy[y_list, x_list])/1000
+
+            x_coord = dist * (((x_min + x_max)/2) - self.d_width/2)  / (self.focal_point/self.downsample)
+            Z_coord = dist * (((y_min + y_max)/2) - self.d_height/2)  / (self.focal_point/self.downsample)
+            pos_people = np.array([[x_coord, dist, Z_coord]])
+            pos_people = self.Rotate_zyx_Translate_points(Rz=self.euler_zyx[0,0], Ry=self.euler_zyx[1,0],
+                    Rx=self.euler_zyx[2,0], Tx=self.pos_xyz[0, 0], Ty=self.pos_xyz[1, 0],
+                    Tz=self.pos_xyz[2, 0], cloudpoints=pos_people)
+
+            marker = Marker()
+            marker.header.frame_id = self.frame_id
+            marker.type = marker.CYLINDER
+            marker.action = marker.ADD
+            marker.scale.x = 1
+            marker.scale.y = 1
+            marker.scale.z = 1
+            marker.color.a = 1.0
+            marker.color.r = 0.0
+            marker.color.g = 0.0
+            marker.color.b = 1.0
+            marker.pose.orientation.w = 0
+            marker.pose.orientation.x = 0
+            marker.pose.orientation.y = 0.7071
+            marker.pose.orientation.z = -0.7071
+            marker.pose.position.x = pos_people[0,0]
+            marker.pose.position.y = -pos_people[0,2]
+            marker.pose.position.z = pos_people[0,1]
+            msg.markers.append(marker)
+
+        self.pub_people.publish(msg)
+
+
+        #indeces = [[y1,y2...], [x1,x2...]]
+        self.darknet_indeces = np.array([ind_y, ind_x])
+        self.darknet_indeces_new = 1
     
       
 '''
@@ -309,10 +379,13 @@ def listener():
     depth_camera = message_filters.Subscriber("/camera/depth/image_rect_raw", Image)
     gyr_sub = message_filters.Subscriber("/camera/gyro/sample", Imu)
     acc_sub = message_filters.Subscriber("/camera/accel/sample", Imu)
-
+    # Darknet_box = message_filters.Subscriber("/darknet_ros/bounding_boxes", BoundingBoxes)
     # using approximate synchronizer. 
-    ts = message_filters.ApproximateTimeSynchronizer([depth_camera, gyr_sub, acc_sub], 1, 0.2, allow_headerless=False)
+    ts = message_filters.ApproximateTimeSynchronizer([depth_camera, gyr_sub, acc_sub], 1, 0.5, allow_headerless=False)
     ts.registerCallback(slam.callback)
+
+    rospy.Subscriber('/darknet_ros/bounding_boxes', BoundingBoxes, slam.Darknet_indeces)
+    rospy.sleep(2)
     while not rospy.is_shutdown():
         slam.Publich_PointCloud()
         rospy.sleep(2)
