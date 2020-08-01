@@ -10,7 +10,10 @@ from visualization_msgs.msg import Marker, MarkerArray
 import std_msgs.msg
 import message_filters
 import numpy as np
-from struct import *
+import cupy as cu
+import cupyx
+
+#from struct import *
 import sys
 import random
 from orientation_estimate import Orientation_estimate
@@ -18,7 +21,9 @@ from darknet_ros_msgs.msg import BoundingBox, BoundingBoxes
 
 from icp import ICP
 
-np.set_printoptions(threshold=sys.maxsize)
+from collections import deque
+
+#np.set_printoptions(threshold=sys.maxsize)
 class SLAM(object):
     def __init__(self, height, width, downsample):
         # camera
@@ -43,6 +48,8 @@ class SLAM(object):
         self.map_z = 6
         self.map_resolution_m = 0.05 # 0.05 m resolution
         self.map_xyz = np.zeros((int(self.map_x//self.map_resolution_m), int(self.map_y//self.map_resolution_m), int(self.map_z//self.map_resolution_m)), dtype=np.int16)
+        self.map_xyz_loc = np.zeros((int(self.map_x//self.map_resolution_m), int(self.map_y//self.map_resolution_m), int(self.map_z//self.map_resolution_m)), dtype=np.int16)
+
         self.reshape_index_m = np.array([int(self.map_y//self.map_resolution_m) * int(self.map_z//self.map_resolution_m), 
                                         int(self.map_z//self.map_resolution_m), 1])
         self.map_max_index =int(self.map_x//self.map_resolution_m) * int(self.map_y//self.map_resolution_m) * int(self.map_z//self.map_resolution_m) -1
@@ -50,6 +57,8 @@ class SLAM(object):
         self.n_remove = 1000
         self.no_map = 1
         self.uncertain = 0
+
+        
         # rotation and position
         self.euler_zyx = np.array([[0.0], [0.0], [0.0]])
         self.pos_xyz = np.array([[self.map_x], [self.map_y], [self.map_z]])/(2)
@@ -66,6 +75,8 @@ class SLAM(object):
         self.icp = ICP()
         self.er = 0
 
+        self.loc_queue = deque()
+
     def callback(self, data, gyr_data, acc_data):
         
         # convert byte data to numpy 2d array
@@ -76,11 +87,9 @@ class SLAM(object):
         self.dist_y_img = np.copy(self.dist_y_img_copy)
         #darknet_indeces = self.Darknet_indeces(Darknet_box.bounding_boxes)
         if self.darknet_indeces_new:
-            #print('before -----------------------------', self.dist_y_img[100])
-            #self.dist_y_img.put(self.darknet_indeces, 0)
+
             self.dist_y_img[self.darknet_indeces[0], self.darknet_indeces[1]] = 0
-            #print('after ------------', self.dist_y_img[100])
-            #print('index', self.darknet_indeces)
+
         self.stamp = data.header.stamp
         self.frame_id = data.header.frame_id
         self.seq = data.header.seq 
@@ -98,9 +107,7 @@ class SLAM(object):
             Tz=self.pos_xyz[2, 0], cloudpoints=self.cloudpoints)
 
         self.add_points_to_map(T_cloud)
-        # will be on its own therad in future...
-        #Map_point_cloud = self.Map_to_point_cloud()
-        #self.Publich_PointCloud(Map_point_cloud)
+    
         self.Publish_Pose()
 
     def img_to_cloudpoints(self):
@@ -240,20 +247,17 @@ class SLAM(object):
         rotation_view = 40
         rot_res = 3
         map_conv = 1/self.map_resolution_m
-        rotz_np = np.zeros((1, ))
+        
+        self.map_xyz_loc = np.zeros((int(self.map_x//self.map_resolution_m), int(self.map_y//self.map_resolution_m), int(self.map_z//self.map_resolution_m)), dtype=np.int16)
+        for i in range(len(self.loc_queue)):
+            self.map_xyz_loc.reshape(-1)[self.loc_queue[i]] = 300
+
         if self.uncertain: # not working too well 
             rotation_view = 60
             length = 0.4
 
         n_steps = int(length / self.map_resolution_m)
-        '''
-        n_loops = int(rotation_view/rot_res) * n_steps**3
-        prob_np = np.zeros(n_loops)
-        rotz_np = np.zeros(n_loops)
-        Tx_np = np.zeros(n_loops)
-        Ty_np = np.zeros(n_loops)
-        Tz_np = np.zeros(n_loops)
-        '''
+
         for i in range(int(rotation_view/rot_res)):
             rot_z = self.euler_zyx[0,0] + (-rotation_view/2 + 3*i)*np.pi/180
             cloud_rot = self.Rotate_zyx(Rz=rot_z, Ry=self.euler_zyx[1,0],
@@ -265,45 +269,21 @@ class SLAM(object):
                     T_y = self.pos_xyz[1, 0] + k*self.map_resolution_m - length/2
                     for z in range(n_steps): 
                         T_z = self.pos_xyz[2, 0] + z*self.map_resolution_m - length/2
-                        #print(T_x, T_y, T_z)
                         loc_cloud_rot = self.Translate_points(Tx=T_x, Ty=T_y, Tz=T_z, cloudpoints=cloud_rot)
                         loc_cloud_rot = loc_cloud_rot*map_conv                        
 
                         indeces = loc_cloud_rot.astype(int).dot(self.reshape_index_m)
                         indeces = indeces[indeces>=0]
                         indeces = indeces[indeces <= self.map_max_index]
-                        sum_ = np.sum(self.map_xyz.reshape(-1)[indeces])
-                        #index = i*(n_steps**3) + j*(n_steps**2) + k*n_steps + z 
-                        #prob_np[index] = sum_**5
-                        #rotz_np[index] = rot_z
-                        #Tx_np[index] = T_x
-                        #Ty_np[index] = T_y
-                        #Tz_np[index] = T_z
+                        sum_ = np.sum(self.map_xyz_loc.reshape(-1)[indeces])
 
-                        
                         if sum_ > sum_prob:
                             sum_prob = sum_
                             rot_z_loc = rot_z
-                            #print('in', rot_z, T_x, T_y, T_z)
                             Tx_loc = T_x
                             Ty_loc = T_y
                             Tz_loc = T_z
-        '''                
-        norm_prob = prob_np/np.sum(prob_np)
-        if np.sum(prob_np) == 0.0:
-            norm_prob = prob_np
-        else:
-            norm_prob = prob_np/np.sum(prob_np)
-            self.euler_zyx[0,0] = np.dot(rotz_np, norm_prob)
-            self.pos_xyz[0, 0] = np.dot(Tx_np, norm_prob)
-            self.pos_xyz[1, 0] = np.dot(Ty_np, norm_prob)
-            self.pos_xyz[2, 0] = np.dot(Tz_np, norm_prob)
 
-        #below need to be fixed...
-        self.loc_certainty = 1 
-        self.oritentaion.quaternions = self.zyx_to_quat(self.euler_zyx[0,0], self.euler_zyx[1,0],self.euler_zyx[2,0])
-
-        '''
         self.loc_certainty = (sum_prob/300)/num_points
         if self.loc_certainty >= 0.6 or self.no_map:
             self.euler_zyx[0,0] = rot_z_loc
@@ -312,8 +292,27 @@ class SLAM(object):
             self.pos_xyz[2, 0] = Tz_loc
             if self.loc_certainty >= 0.7:
                 self.oritentaion.quaternions = self.zyx_to_quat(self.euler_zyx[0,0], self.euler_zyx[1,0],self.euler_zyx[2,0])
+
+        T_cloud = self.Rotate_zyx_Translate_points(Rz=self.euler_zyx[0,0], Ry=self.euler_zyx[1,0],
+                            Rx=self.euler_zyx[2,0], Tx=self.pos_xyz[0, 0], Ty=self.pos_xyz[1, 0],
+                            Tz=self.pos_xyz[2, 0], cloudpoints=self.cloudpoints)
+
+        map_point_index = T_cloud/self.map_resolution_m
+        #np.add.at(self.map_xyz.reshape(-1), remove_index, int(-10*(self.downsample)))
+        indeces = map_point_index.astype(int).dot(self.reshape_index_m)
+        indeces = indeces[indeces>=0] # might exist faster methods
+        indeces = indeces[indeces <= self.map_max_index]
+        #indeces_ = np.array(list(set(indeces)))
+
+        self.loc_queue.append(indeces)
+
+        if len(self.loc_queue) > 6:
+            self.loc_queue.popleft()
+
+        #self.map_xyz.clip(0, 300, out= self.map_xyz) 
+        self.map_xyz_loc.reshape(-1)[indeces] = 300
             
-            print('rot z', rot_z_loc, Tx_loc, Ty_loc, Tz_loc, self.loc_certainty)
+        print('rot z', rot_z_loc, Tx_loc, Ty_loc, Tz_loc, self.loc_certainty)
     
     def zyx_to_quat(self, z, y, x):
         quat = np.array([[np.cos(x/2) * np.cos(y/2) * np.cos(z/2) + np.sin(x/2) * np.sin(y/2) * np.sin(z/2)],
