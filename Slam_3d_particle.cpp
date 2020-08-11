@@ -26,10 +26,13 @@ public:
     int depth_z[res_v][res_h];
     int depth_y[res_v][res_h];
     int depth_x[res_v][res_h];
+
     double horizontal_distance[res_h];
     double vertical_distance[res_v];
     double focal_point = 385.0/4.0;
 
+    double cloudpoints[res_h*res_v][3]; // x,y,z
+    int cloudpoints_index = 0;
 
     Slam(){ 
         // constructor 
@@ -48,6 +51,7 @@ public:
         //cout << "inside callback " << "\n";
         resize_depth_to_array(msg->data);
 
+        img_to_cloud();
 
         // check computation time
         chrono::high_resolution_clock::time_point time_now = chrono::high_resolution_clock::now();
@@ -97,6 +101,24 @@ private:
             }
         }
         return (devide_sum != 0) ? int_sum/devide_sum : 0; // returns mean
+    }
+
+    // calculate cloudpoints
+    
+    void img_to_cloud(){
+        cloudpoints_index = 0; 
+        for(int i = 0; i < res_v; i++){
+            for(int j = 0; j < res_h; j++){
+                if (depth_y[i][j] != 0){
+                    cloudpoints[cloudpoints_index][0] = depth_x[i][j] / 1000.0;
+                    cloudpoints[cloudpoints_index][1] = depth_y[i][j] / 1000.0;
+                    cloudpoints[cloudpoints_index][2] = depth_z[i][j] / 1000.0;
+                    cloudpoints_index += 1;
+                }
+
+            }
+        }
+
     }
 
 
