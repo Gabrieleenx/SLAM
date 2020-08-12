@@ -99,12 +99,12 @@ private:
     int calc_mean_16(const vector<uint8_t> &image, int z, int x){
         int_sum = 0;
         devide_sum  = 0;
-        int8_index = (z+1)*(x+1)*32-32; // idex in one dimetional vector
+        int8_index = z*4*1280+x*8; // idex in one dimetional vector
         for(int i = 0; i < 4;  i++){
             int8_idx_l = int8_index + i*1280; // 640*2       
             for(int j = 0; j < 4; j++) {
                 int8_to_int = (image[int8_idx_l+1] << 8 )| image[int8_idx_l]; // int16 to int, 
-                //data little endian but looks like the convertion whats big endian...
+                //data little endian but looks like the convertion whants big endian...
                 int8_idx_l += 2; // two int8 to build int16 
                 int_sum += int8_to_int; // sum all 16 values
                 devide_sum += (int8_to_int != 0) ? 1 : 0; // how many values that are not 0
@@ -135,6 +135,7 @@ private:
 };
 
 void publish_cloud_points(const Slam& slam, ros::Publisher& pub, uint32_t seq){
+    // creates pointcloud message and publish it. 
     if(slam.publish_cloud == 1){
         sensor_msgs::PointCloud msg;
         msg.header.frame_id = slam.frame_id;
@@ -143,8 +144,14 @@ void publish_cloud_points(const Slam& slam, ros::Publisher& pub, uint32_t seq){
 
         geometry_msgs::Point32 point32;
         sensor_msgs::ChannelFloat32 point_rgb;
+        uint8_t red;
+        uint8_t green;
+        uint8_t blue;
 
         point_rgb.name = "rgb";
+
+        unsigned int packed_int_rgb;
+        float packed_float_rgb;
 
         for(int i = 0; i < slam.cloudpoints_index; i++){
             point32.x = slam.cloudpoints[i][0];
@@ -152,8 +159,18 @@ void publish_cloud_points(const Slam& slam, ros::Publisher& pub, uint32_t seq){
             point32.z = slam.cloudpoints[i][1];
 
             msg.points.push_back(point32);
-        }
 
+            // color channels, not working 100%, makes bands instead of gradient..
+            red = (slam.cloudpoints[i][2]+2)*40;
+            green = 100;
+            blue = 255 - ((slam.cloudpoints[i][2]+2)*40);
+            // probably someting wrong in the packing
+            packed_int_rgb = (red <<16) | (green << 8) | blue;
+            packed_float_rgb = (float) ( ((double) packed_int_rgb)/((double) (1<<24)) );
+            point_rgb.values.push_back(packed_float_rgb);
+            
+        }
+        msg.channels.push_back(point_rgb);
         pub.publish(msg);
 
 
