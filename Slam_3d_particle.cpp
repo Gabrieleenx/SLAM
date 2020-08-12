@@ -1,7 +1,9 @@
 #include "ros/ros.h"
 #include "std_msgs/String.h"
 #include "sensor_msgs/Image.h"
-
+#include "sensor_msgs/PointCloud.h"
+#include "geometry_msgs/Point32.h"
+#include "sensor_msgs/ChannelFloat32.h"
 
 #include <iostream> // for cout
 #include <chrono>  // for timer
@@ -34,6 +36,10 @@ public:
     double cloudpoints[res_h*res_v][3]; // x,y,z
     int cloudpoints_index = 0;
 
+    string frame_id = "camera_depth_optical_frame";  
+
+    int publish_cloud = 0; // nothing to publish yet
+
     Slam(){ 
         // constructor 
         for(int i = 0; i < res_h; i++){
@@ -48,7 +54,8 @@ public:
     void callback(const sensor_msgs::Image::ConstPtr& msg){
         chrono::high_resolution_clock::time_point time_last = chrono::high_resolution_clock::now();
 
-        //cout << "inside callback " << "\n";
+        frame_id =  msg->header.frame_id; // should not change it but just in case
+
         resize_depth_to_array(msg->data);
 
         img_to_cloud();
@@ -60,6 +67,9 @@ public:
         int time = duration.count();
         double fps = 1.0/time *1000000;
         cout << "Fps "<< fps << " " << depth_y[31][22] << " "<< depth_x[31][22] <<" "<< depth_z[31][22] << "\n";
+
+
+        publish_cloud = 1; // will be moved to somewhere else when the map has been implemented 
     }
 
 private:
@@ -124,19 +134,59 @@ private:
 
 };
 
+void publish_cloud_points(const Slam& slam, ros::Publisher& pub, uint32_t seq){
+    if(slam.publish_cloud == 1){
+        sensor_msgs::PointCloud msg;
+        msg.header.frame_id = slam.frame_id;
+        msg.header.stamp = ros::Time::now();
+        msg.header.seq = seq;
 
+        geometry_msgs::Point32 point32;
+        sensor_msgs::ChannelFloat32 point_rgb;
+
+        point_rgb.name = "rgb";
+
+        for(int i = 0; i < slam.cloudpoints_index; i++){
+            point32.x = slam.cloudpoints[i][0];
+            point32.y = -slam.cloudpoints[i][2];
+            point32.z = slam.cloudpoints[i][1];
+
+            msg.points.push_back(point32);
+        }
+
+        pub.publish(msg);
+
+
+
+    }
+
+    //cout<< "kind working"<< unsigned(seq) << "\n";
+}
 
 
 int main(int argc, char **argv){
 
     Slam slam;
 
-    ros::init(argc, argv, "listener");
+    ros::init(argc, argv, "Slam");
 
     ros::NodeHandle n;
 
+    ros::Publisher publish_point_cloud = n.advertise<sensor_msgs::PointCloud>("PointCloud", 1);
+
     ros::Subscriber sub = n.subscribe("/camera/depth/image_rect_raw", 10, &Slam::callback, &slam);
 
+    ros::Rate loop_rate(10);
+
+    uint32_t seq = 1;
+
+    while (ros::ok()){
+        //cout<< "spin once"<< "\n";
+        publish_cloud_points(slam, publish_point_cloud, seq);
+        ros::spinOnce();
+        loop_rate.sleep();
+        ++seq;
+    }
     ros::spin();
 
     return 0;
