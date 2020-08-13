@@ -4,7 +4,8 @@ import rospy
 from sensor_msgs.msg import Imu
 import numpy as np
 import message_filters
-from geometry_msgs.msg import Quaternion
+from geometry_msgs.msg import Quaternion, Point
+import threading
 
 class Orientation(object):
 	def __init__(self):
@@ -17,8 +18,14 @@ class Orientation(object):
 		self.grav = np.array([[0],[0],[9.81]])
 		self.cov_acc = np.array([[0.0001, 0.0, 0.0],[0.0, 0.0001, -0.0001],[0.0, -0.0001, 0.0015]])
 		self.delta_T = 0.1
-	def callback(self, gyr_data, acc_data):
+		self.lock = threading.Lock()
 
+		# publisher
+		self.pub = rospy.Publisher('/gyro_acc_filter', Point, queue_size=1)
+		 
+
+	def callback(self, gyr_data, acc_data):
+		self.lock.acquire()
 		gyro = np.array([[gyr_data.angular_velocity.x],[gyr_data.angular_velocity.z],[-gyr_data.angular_velocity.y]])
 		acc = np.array([[acc_data.linear_acceleration.x], [acc_data.linear_acceleration.z], [-acc_data.linear_acceleration.y]])
 		time = acc_data.header.stamp.secs + acc_data.header.stamp.nsecs / 1e9
@@ -36,9 +43,17 @@ class Orientation(object):
 		self.quaternions = normalize_quat(self.quaternions)
 		
 		self.euler_zyx = quaternions_to_euler_zyx(self.quaternions)
+		self.lock.release()
+		self.pub.publish(Point(self.euler_zyx[2,0], self.euler_zyx[1,0],self.euler_zyx[0,0]))
 		print(self.euler_zyx)
 		
-		
+	def correction(self, data):
+		self.lock.acquire()
+		correction = self.euler_zyx[0,0] + data.z
+		self.quaternions = zyx_to_quat(correction[0,0],correction[1,0],correction[2,0])
+		self.lock.release()
+
+
 def orientation_prediction(q, P, delta_time, gyro, correction_gyro, cov_gyro):
 	F =  np.eye(4, dtype = float) + delta_time * 0.5 * Somega(gyro)
 	dgw = delta_time * 0.5 * np.array([[-q[1,0], -q[2,0], -q[3,0]],
@@ -164,6 +179,8 @@ def listener():
 	# using approximate synchronizer. 
 	ts = message_filters.ApproximateTimeSynchronizer([gyr_sub, acc_sub], 1, 0.005, allow_headerless=False)
 	ts.registerCallback(orientation.callback)
+
+	rospy.Subscriber('/orientation_correction', Point, orientation.correction)
 
 
 	rospy.spin()
