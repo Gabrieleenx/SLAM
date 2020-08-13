@@ -161,7 +161,7 @@ def normalize_quat(q):
 	return q / np.linalg.norm(q)
 
 
-def zyx_to_quat(self, z, y, x):
+def zyx_to_quat(z, y, x):
 	quat = np.array([[np.cos(x/2) * np.cos(y/2) * np.cos(z/2) + np.sin(x/2) * np.sin(y/2) * np.sin(z/2)],
 	[np.sin(x/2) * np.cos(y/2) * np.cos(z/2) - np.cos(x/2) * np.sin(y/2) * np.sin(z/2)],
 	[np.cos(x/2) * np.sin(y/2) * np.cos(z/2) + np.sin(x/2) * np.cos(y/2) * np.sin(z/2)],
