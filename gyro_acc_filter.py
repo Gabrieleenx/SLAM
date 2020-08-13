@@ -4,33 +4,23 @@ import rospy
 from sensor_msgs.msg import Imu
 import numpy as np
 import message_filters
-#import threading
 from geometry_msgs.msg import Quaternion
 
-# todo, orientation imu estimation
-# calibration imu, both gyro and acc
-# figure out why EKF in measurement update has a unstable error covariance estimation 
-# worst case use complementary filter instead... 
-# change conversion from quat to euler from xyz too zyx
-
-#np.set_printoptions(precision=None, suppress=None)
-
-class Slam(object):
+class Orientation(object):
 	def __init__(self):
 		self.last_time = 0.0
-		self.euler_xyz = np.array([[0.0], [0.0], [0.0]])
+		self.euler_zyx = np.array([[0.0], [0.0], [0.0]])
 		self.quaternions = np.array([[1.0], [0.0], [0.0], [0.0]])
 		self.P = np.eye(4, dtype = float) # error covariance matrix
 		self.correction_gyro = np.array([[0.000508907], [0.00069779], [0.002485042]])
 		self.cov_gyro = (0.0001) *np.array([[0.6, -0.15, -0.03],[-0.15, 0.6, 0.05],[-0.03, 0.05, 0.6]])
 		self.grav = np.array([[0],[0],[9.81]])
-		self.cov_acc = np.array([[0.0001, 0.0, 0.0],[0.0, 0.0001, -0.001],[0.0, -0.0001, 0.0015]])
+		self.cov_acc = np.array([[0.0001, 0.0, 0.0],[0.0, 0.0001, -0.0001],[0.0, -0.0001, 0.0015]])
 		self.delta_T = 0.1
 	def callback(self, gyr_data, acc_data):
 
 		gyro = np.array([[gyr_data.angular_velocity.x],[gyr_data.angular_velocity.z],[-gyr_data.angular_velocity.y]])
 		acc = np.array([[acc_data.linear_acceleration.x], [acc_data.linear_acceleration.z], [-acc_data.linear_acceleration.y]])
-
 		time = acc_data.header.stamp.secs + acc_data.header.stamp.nsecs / 1e9
 		if self.last_time == 0:
 			self.last_time = time
@@ -39,15 +29,14 @@ class Slam(object):
 			delta_time = time - self.last_time
 			self.last_time = time
 		self.delta_T = delta_time
-		# something wrong in the acc update :(
 		self.quaternions, self.P = orientation_prediction(self.quaternions, self.P, delta_time, gyro, self.correction_gyro, self.cov_gyro)
 		self.quaternions = normalize_quat(self.quaternions)
 
 		self.quaternions, self.P = orientation_acc_update(self.quaternions, self.P, acc, self.cov_acc, self.grav)
 		self.quaternions = normalize_quat(self.quaternions)
 		
-		self.euler_xyz = quaternions_to_euler_zyx(self.quaternions)
-		print(self.euler_xyz)
+		self.euler_zyx = quaternions_to_euler_zyx(self.quaternions)
+		print(self.euler_zyx)
 		
 		
 def orientation_prediction(q, P, delta_time, gyro, correction_gyro, cov_gyro):
@@ -73,8 +62,7 @@ def orientation_acc_update(q, P, acc, cov_acc, grav):
 	S = h.dot(P).dot(h.transpose()) + cov_acc
 	K = P.dot(h.transpose()).dot(np.linalg.pinv(S))
 	q += K.dot(acc - np.dot(Qq(q).transpose(), grav))
-	P += -0.00001* K.dot(S).dot(K.transpose()) # something wrong. creates instabilites, should not be scaled
-
+	P += - K.dot(S).dot(K.transpose())
 	return q, P
 
 def orientation_map_update(euler_xyz, P):
@@ -157,8 +145,16 @@ def quaternions_to_euler_zyx(q):
 def normalize_quat(q):
 	return q / np.linalg.norm(q)
 
+
+def zyx_to_quat(self, z, y, x):
+	quat = np.array([[np.cos(x/2) * np.cos(y/2) * np.cos(z/2) + np.sin(x/2) * np.sin(y/2) * np.sin(z/2)],
+	[np.sin(x/2) * np.cos(y/2) * np.cos(z/2) - np.cos(x/2) * np.sin(y/2) * np.sin(z/2)],
+	[np.cos(x/2) * np.sin(y/2) * np.cos(z/2) + np.sin(x/2) * np.cos(y/2) * np.sin(z/2)],
+	[np.cos(x/2) * np.cos(y/2) * np.sin(z/2) - np.sin(x/2) * np.sin(y/2) * np.cos(z/2)]])
+	return quat
+
 def listener():
-	slam = Slam()
+	orientation = Orientation()
 
 	rospy.init_node('listener_IMU', anonymous=True) # Creates Node ID
 
@@ -167,7 +163,7 @@ def listener():
 
 	# using approximate synchronizer. 
 	ts = message_filters.ApproximateTimeSynchronizer([gyr_sub, acc_sub], 1, 0.005, allow_headerless=False)
-	ts.registerCallback(slam.callback)
+	ts.registerCallback(orientation.callback)
 
 
 	rospy.spin()
