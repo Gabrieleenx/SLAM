@@ -4,6 +4,7 @@
 #include "sensor_msgs/PointCloud.h"
 #include "geometry_msgs/Point32.h"
 #include "sensor_msgs/ChannelFloat32.h"
+#include <signal.h>
 
 #include <random>
 #include <iostream> // for cout
@@ -13,6 +14,20 @@ using namespace std;
 // globals as not allowed to define in class :(
 const static double map_resloution = 0.05; // in meters
 const double pi = 2*acos(0.0);
+
+
+// map grid resolution 0.05 meters.
+const static int map_grid_size_x = 10/0.05;// in meters
+const static int map_grid_size_y = 10/0.05; // in meters
+const static int map_grid_size_z = 4/0.05; // in met
+// global heap allocated memmory...
+int map_elements = map_grid_size_x*map_grid_size_y*map_grid_size_z;
+uint8_t* map_localization = new uint8_t[map_grid_size_x*map_grid_size_y*map_grid_size_z](); // ()initilizes to zero, hopefully. 
+// converion x*map_grid_size_y*map_grid_size_z + y*map_grid_size_z + z
+
+int index_conv(int x, int y, int z){
+    return x*map_grid_size_y*map_grid_size_z + y*map_grid_size_z + z;
+}
 
 class Slam{
 
@@ -35,14 +50,9 @@ public:
 
     int publish_cloud = 0; // nothing to publish yet
 
-    const static int map_size_x = 30;// in meters
-    const static int map_size_y = 30; // in meters
-    const static int map_size_z = 6; // in meters
-
-    // map grid resolution 0.05 meters.
-    const static int map_grid_size_x = 30/0.05;// in meters
-    const static int map_grid_size_y = 30/0.05; // in meters
-    const static int map_grid_size_z = 6/0.05; // in meters
+    const static int map_size_x = 10;// in meters
+    const static int map_size_y = 10; // in meters
+    const static int map_size_z = 4; // in meters
 
     double euler_zyx[3] = { 0 };
     double pos_xyz[3] = {map_size_x/2, map_size_y/2, map_size_z/2};
@@ -71,7 +81,8 @@ public:
         img_to_cloud();
 
 
-
+        scan_localization();
+        scan_localization_map_update();
 
         // will be included in paricles later
         euler_zyx[0] += euler_zyx_diff_scan[0];
@@ -85,143 +96,16 @@ public:
         //time_last = time_now;
         int time = duration.count();
         double fps = 1.0/time *1000000;
-        cout << "Fps "<< fps << " " << depth_y[31][22] << " "<< depth_x[31][22] <<" "<< depth_z[31][22] << "\n";
+        cout << "Fps "<< fps << " rot " << euler_zyx[0] << " x "<< pos_xyz[0] <<" y "<< pos_xyz[0]<<" z "<< pos_xyz[2] << "\n";
 
 
         publish_cloud = 1; // will be moved to somewhere else when the map has been implemented 
     }
 
 private:
-
-    int map_localization[map_grid_size_x][map_grid_size_y][map_grid_size_z] = { 0 };
-    const static int num_scan_points = 500;
-    int sum_prob = 0;
-    int sum_ = 0;
-    //int rand_index[num_scan_points];
-    double rot_z_loc = 0;
-    double rot_z;
-    double rot_y = 0; // will be changeds to be from gyr acc fitler 
-    double rot_x = 0; // will be changeds to be from gyr acc fitler 
-    double Tx_loc = map_size_x/2;
-    double Ty_loc = map_size_y/2;
-    double Tz_loc = map_size_z/2;
-    double Tx;
-    double Ty;
-    double Tz;
-    double length = 0.25;
-    int rotation_view = 45;
-    int rot_resolution = 3;
-    int r_steps = rotation_view/rot_resolution;
-    int n_steps = length/map_resloution;
-
-    double map_conv = 1/map_resloution;
-    int point_loc_new[3];
-
-    const static int num_of_old_points = 5;
-    int points_scan_map[res_h*res_v*num_of_old_points][3]; // already multiplyed and indexed 
-    int points_scan_map_index[num_of_old_points];
-    int points_scan_map_life[num_of_old_points] = { 0 };
-    int random_index;
-
-    int indx[3];
-    double cloud_test[num_scan_points][3];
-    double cloud_test_rot[num_scan_points][3];
-    double cloud_test_loc[num_scan_points][3];
-    int firts_run = 1;
-
-    void scan_localization(){
-
-        if(firts_run == 0){
-
-            // upadate loc map
-       
-            for(int i = 0; i < cloudpoints_index; i++){
-                point_loc_new[0] = round(cloudpoints[i][0] * map_conv);
-                point_loc_new[1] = round(cloudpoints[i][1] * map_conv);
-                point_loc_new[2] = round(cloudpoints[i][2] * map_conv);
-                map_localization[point_loc_new[0]][point_loc_new[1]][point_loc_new[2]] = 1;
-            }
-
-
-            // localization
-            int sum_prob = 0;
-
-            for(int r = 0; r < r_steps; r++){
-                rot_z = (-rotation_view/2 + 3*r)*pi/180;
-                // rotate cloud
-                rotate_point(cloud_test_rot, cloud_test, num_scan_points, rot_z, rot_y, rot_x);
-
-                for(int x = 0; x < n_steps; x++){
-                    Tx = x*map_resloution - length/2;
-                    for(int i = 0; i < num_scan_points; i++){
-                        cloud_test_loc[i][0] = cloud_test_rot[i][0] + Tx;
-                    }
-
-                    for(int y = 0; y < n_steps; y++){
-                        Ty = y*map_resloution - length/2;
-                        for(int i = 0; i < num_scan_points; i++){
-                            cloud_test_loc[i][1] = cloud_test_rot[i][1] + Ty;
-                        }
-
-                        // will not be needed for the robot... as z is constant 
-                        for(int z = 0; z < n_steps; z++){
-                            Tz = z*map_resloution - length/2;
-                            sum_ = 0;
-                            for(int i = 0; i < num_scan_points; i++){
-                                cloud_test_loc[i][2] = cloud_test_rot[i][2] + Tz;
-                                
-                                indx[0] = round(cloud_test_loc[i][0]*map_conv);
-                                indx[1] = round(cloud_test_loc[i][1]*map_conv);
-                                indx[2] = round(cloud_test_loc[i][2]*map_conv);
-
-                                if (indx[0] < 0 || indx[0] >= map_grid_size_x){
-                                    continue;
-                                }
-                                if (indx[1] < 0 || indx[1] >= map_grid_size_y){
-                                    continue;
-                                }
-                                if (indx[2] < 0 || indx[2] >= map_grid_size_z){
-                                    continue;
-                                }
-                                sum_ += map_localization[indx[0]][indx[1]][indx[2]];
-
-                            }
-
-                            if (sum_ > sum_prob){
-                                sum_prob = sum_;
-                                rot_z_loc = rot_z;
-                                Tx_loc = Tx;
-                                Ty_loc = Ty;
-                                Tz_loc = Tz;
-                            }
-                        }
-                    }
-                }
-            }
-
-            euler_zyx_diff_scan[0] = -rot_z_loc;
-            pos_xyz_diff_scan[0] = -Tx_loc;
-            pos_xyz_diff_scan[1] = -Ty_loc;
-            pos_xyz_diff_scan[2] = -Tz_loc;
-
-        }
-        // generate 500 random index...
-        random_device rd; // create random random seed
-        mt19937 gen(rd()); // put the seed inte the random generator 
-        uniform_int_distribution<> distr(0, cloudpoints_index); // create a distrobution
-        for(int i = 0; i < num_scan_points; i++){
-            random_index = distr(gen);
-            cloud_test[i][0] = cloudpoints[random_index][0];
-            cloud_test[i][1] = cloudpoints[random_index][1];
-            cloud_test[i][2] = cloudpoints[random_index][2];
-        }
-        firts_run = 0;
-    }
-
-    /*
     // scan localization 
     // map xyz
-    int map_localization[map_grid_size_x][map_grid_size_y][map_grid_size_z] = { 0 };
+    //int map_localization[map_grid_size_x][map_grid_size_y][map_grid_size_z] = { 0 };
     const static int num_scan_points = 500;
     int sum_prob = 0;
     int sum_ = 0;
@@ -242,25 +126,32 @@ private:
     int r_steps = rotation_view/rot_resolution;
     int n_steps = length/map_resloution;
 
+    double euler_zyx_scan[3] = { 0 };
+    double pos_xyz_scan[3] = {map_size_x/2, map_size_y/2, map_size_z/2};
+
     double map_conv = 1/map_resloution;
 
     const static int num_of_old_points = 5;
-    int points_scan_map[res_h*res_v*num_of_old_points][3]; // already multiplyed and indexed 
+    int points_scan_map[res_h*res_v*num_of_old_points]; // already multiplyed and indexed 
     int points_scan_map_index[num_of_old_points];
-    int points_scan_map_life[num_of_old_points] = { 0 };
+    int points_scan_map_life[num_of_old_points] = { };
     int random_index;
 
     int indx[3];
     double cloud_test[num_scan_points][3];
     double cloud_test_rot[num_scan_points][3];
     double cloud_test_loc[num_scan_points][3];
+    int first_run = 1;
+    int index_after_cov;
+    int index_after_cov_2;
 
     void scan_localization(){
         // upadate loc map
         for(int i = 0; i < num_of_old_points; i++){
-            if (points_scan_map_life[i] != 0){
+            if (points_scan_map_life[i] > 0){
+                //cout << "adding to map " << "\n";
                 for(int j = i*res_h*res_v; j < i*res_h*res_v + points_scan_map_index[i]; j++){
-                    map_localization[points_scan_map[j][0]][points_scan_map[j][1]][points_scan_map[j][2]] = 1;
+                    map_localization[points_scan_map[j]] = 1;
                 }
             }
         }
@@ -280,26 +171,26 @@ private:
         int sum_prob = 0;
 
         for(int r = 0; r < r_steps; r++){
-            rot_z = euler_zyx[0] + (-rotation_view/2 + 3*r)*pi/180;
+            rot_z = euler_zyx_scan[0] + (-(rotation_view-rot_resolution)/2 + 3*r)*pi/180;
             
             // rotate cloud
             rotate_point(cloud_test_rot, cloud_test, num_scan_points, rot_z, rot_y, rot_x);
 
             for(int x = 0; x < n_steps; x++){
-                Tx = pos_xyz[0] + x*map_resloution - length/2;
+                Tx = pos_xyz_scan[0] + x*map_resloution - (length-map_resloution)/2;
                 for(int i = 0; i < num_scan_points; i++){
                     cloud_test_loc[i][0] = cloud_test_rot[i][0] + Tx;
                 }
 
                 for(int y = 0; y < n_steps; y++){
-                    Ty = pos_xyz[1] + y*map_resloution - length/2;
+                    Ty = pos_xyz_scan[1] + y*map_resloution - (length-map_resloution)/2;
                     for(int i = 0; i < num_scan_points; i++){
                         cloud_test_loc[i][1] = cloud_test_rot[i][1] + Ty;
                     }
 
                     // will not be needed for the robot... as z is constant 
                     for(int z = 0; z < n_steps; z++){
-                        Tz = pos_xyz[2] + z*map_resloution - length/2;
+                        Tz = pos_xyz_scan[2] + z*map_resloution - (length-map_resloution)/2;
                         sum_ = 0;
                         for(int i = 0; i < num_scan_points; i++){
                             cloud_test_loc[i][2] = cloud_test_rot[i][2] + Tz;
@@ -308,20 +199,16 @@ private:
                             indx[1] = round(cloud_test_loc[i][1]*map_conv);
                             indx[2] = round(cloud_test_loc[i][2]*map_conv);
 
-                            if (indx[0] < 0 || indx[0] >= map_grid_size_x){
+                            index_after_cov_2 = index_conv(indx[0], indx[1], indx[2]);
+                            if (index_after_cov_2 < 0 || index_after_cov_2 >= map_elements){
                                 continue;
                             }
-                            if (indx[1] < 0 || indx[1] >= map_grid_size_y){
-                                continue;
-                            }
-                            if (indx[2] < 0 || indx[2] >= map_grid_size_z){
-                                continue;
-                            }
-                            sum_ += map_localization[indx[0]][indx[1]][indx[2]];
-
+                            sum_ += map_localization[index_after_cov_2];
+                            //cout << "all map are zero" << "\n";
                         }
 
                         if (sum_ > sum_prob){
+                            //cout << "sum_ if " << sum_ <<"\n";
                             sum_prob = sum_;
                             rot_z_loc = rot_z;
                             Tx_loc = Tx;
@@ -333,44 +220,115 @@ private:
             }
         }
 
-        euler_zyx_diff_scan[0] = rot_z_loc - euler_zyx[0];
-        pos_xyz_diff_scan[0] = Tx_loc - pos_xyz[0];
-        pos_xyz_diff_scan[1] = Tx_loc - pos_xyz[1];
-        pos_xyz_diff_scan[2] = Tx_loc - pos_xyz[2];
+        euler_zyx_diff_scan[0] = rot_z_loc - euler_zyx_scan[0];
+        pos_xyz_diff_scan[0] = Tx_loc - pos_xyz_scan[0];
+        pos_xyz_diff_scan[1] = Ty_loc - pos_xyz_scan[1];
+        pos_xyz_diff_scan[2] = Tz_loc - pos_xyz_scan[2];
+
+        euler_zyx_scan[0] = rot_z_loc;
+        pos_xyz_scan[0] = Tx_loc;
+        pos_xyz_scan[1] = Ty_loc;
+        pos_xyz_scan[2] = Tz_loc;
     }
+
+    //
+    double cloudpoints_rot_update[res_h*res_v][3];
+
+    double euler_zyx_update[3] = { 0 };
+    double pos_xyz_update[3] = {map_size_x/2, map_size_y/2, map_size_z/2};
+    double update_value = 0;
 
     void scan_localization_map_update(){
         // this should run after sensor fusion
         // delete old points in loc map
-        for(int i = 0; i < num_of_old_points; i++){
-            if (points_scan_map_life[i] == 1 || points_scan_map_life[i] == 0){
-                if (points_scan_map_life[i] != 0){
-                    for(int j = i*res_h*res_v; j < i*res_h*res_v + points_scan_map_index[i]; j++){
-                        map_localization[points_scan_map[j][0]][points_scan_map[j][1]][points_scan_map[j][2]] = 0;
+
+        update_value =  abs(pos_xyz_scan[0] - pos_xyz_update[0]) + abs(pos_xyz_scan[1] - pos_xyz_update[1])
+                    +abs(pos_xyz_scan[2] - pos_xyz_update[2]) + 30*abs(euler_zyx_scan[0]-euler_zyx_update[0]);
+
+
+        if (update_value > 10 || first_run == 1){
+
+            
+            for(int i = 0; i < num_of_old_points; i++){
+                if (points_scan_map_life[i] == 1 || points_scan_map_life[i] <= 0){
+                    if (points_scan_map_life[i] != 0){
+                        for(int j = i*res_h*res_v; j < i*res_h*res_v + points_scan_map_index[i]; j++){
+                            map_localization[points_scan_map[j]] = 0;
+                        }
                     }
+                    
+                    rotate_point(cloudpoints_rot_update, cloudpoints, cloudpoints_index, euler_zyx_scan[0], euler_zyx_scan[1], euler_zyx_scan[2]);
+                    Translate_point(cloudpoints_rot_update, cloudpoints_rot_update, cloudpoints_index, pos_xyz_scan[0], pos_xyz_scan[1], pos_xyz_scan[2]);
+                    // caclulate all index for new points.
+
+                    // add index to list at place and update points_scan_map_index
+                    points_scan_map_index[i] = 0;
+                    for(int j= 0; j < cloudpoints_index; j++){
+                        indx[0] = round((cloudpoints_rot_update[j][0]) * map_conv);
+                        indx[1] = round((cloudpoints_rot_update[j][1]) * map_conv);
+                        indx[2] = round((cloudpoints_rot_update[j][2]) * map_conv);
+                        index_after_cov = index_conv(indx[0], indx[1], indx[2]);
+                        if (index_after_cov < 0 || index_after_cov >= map_elements){
+                            //cout << "index out of bound " << index_after_cov << "\n";
+                        }
+                        else{
+                            points_scan_map[res_v*res_h*i + j] = index_after_cov;
+                            points_scan_map_index[i] += 1;
+                            //map_localization[index_after_cov] = 1;
+                        }
+                    
+                    }
+                    //cout << "num of index in map " << points_scan_map_index[i] << "\n";
+
+                    // add 6 to life
+                    points_scan_map_life[i] = 6;
+                    //cout << "adding life to " << i << "\n"; 
+                    // remove 1 life 
+                    break;
+
                 }
-                
-                rotate_point(cloud_test_rot, cloudpoints, cloudpoints_index, rot_z, rot_y, rot_x)
-                // caclulate all index for new points.
-
-
-                // add index to list at place and update points_scan_map_index
-
-                // add 6 to life
-
-                // remove 1 life 
-
-
-
+            }    
+            for(int i = 0; i < num_of_old_points; i++){
+                points_scan_map_life[i] += -1;
             }
-        }      
+            first_run = 0;
+
+            pos_xyz_update[0] = pos_xyz_scan[0];
+            pos_xyz_update[1] = pos_xyz_scan[1];
+            pos_xyz_update[2] = pos_xyz_scan[2];
+            euler_zyx_update[0] = euler_zyx_scan[0];
+            cout << "update" << "\n"; 
+        }
     }
-    */
-   
-
-
+    
+    //
+    double Rot_M[3][3];
+    // rotates points 
     void rotate_point(double new_point[][3], double point[][3], int num_points, double z, double y, double x){
         // need to be implemented...
+        Rot_M[0][0] = cos(y)*cos(z);
+        Rot_M[0][1] = cos(z)*sin(x)*sin(y) - cos(x)*sin(z);
+        Rot_M[0][2] = sin(x)*sin(z) + cos(x)*cos(z)*sin(y);
+        Rot_M[1][0] = cos(y)*sin(z);
+        Rot_M[1][1] = cos(x)*cos(z) + sin(x)*sin(y)*sin(z);
+        Rot_M[1][2] = cos(x)*sin(y)*sin(z) - cos(z)*sin(x);
+        Rot_M[2][0] = -sin(y);
+        Rot_M[2][1] = cos(y)*sin(x);
+        Rot_M[2][2] = cos(x)*cos(y);
+
+        for(int i = 0; i < num_points; i++){
+            new_point[i][0] = Rot_M[0][0] * point[i][0] + Rot_M[0][1] * point[i][1] + Rot_M[0][2] * point[i][2];
+            new_point[i][1] = Rot_M[1][0] * point[i][0] + Rot_M[1][1] * point[i][1] + Rot_M[1][2] * point[i][2];
+            new_point[i][2] = Rot_M[2][0] * point[i][0] + Rot_M[2][1] * point[i][1] + Rot_M[2][2] * point[i][2];
+        }
+    }
+
+    void Translate_point(double new_point[][3], double point[][3], int num_points, double x, double y, double z){
+        for(int i = 0; i < num_points; i++){
+            new_point[i][0] = point[i][0] + x;
+            new_point[i][1] = point[i][1] + y;
+            new_point[i][2] = point[i][2] + z;
+        }
     }
 
     // resize depth image uint8_t to array int by mean over 4x4 and igoring zeors
@@ -474,14 +432,28 @@ void publish_cloud_points(const Slam& slam, ros::Publisher& pub, uint32_t seq){
 
 }
 
+void mySigintHandler(int sig){
+    // do pre shutdown, like delete heap memmory..
+    delete[] map_localization; 
+    // does result in a segmentation fault as other 
+    //thredes will look for this at the moment of shutdown. 
+
+    //
+    cout << " Shutdown initilized " << "\n";
+
+    ros::shutdown();
+}
+
 
 int main(int argc, char **argv){
 
     Slam slam;
 
-    ros::init(argc, argv, "Slam");
+    ros::init(argc, argv, "Slam", ros::init_options::NoSigintHandler);
 
     ros::NodeHandle n;
+
+    signal(SIGINT, mySigintHandler);
 
     ros::Publisher publish_point_cloud = n.advertise<sensor_msgs::PointCloud>("PointCloud", 1);
 
@@ -498,6 +470,8 @@ int main(int argc, char **argv){
         ++seq;
     }
     ros::spin();
+
+
 
     return 0;
 
