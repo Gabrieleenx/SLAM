@@ -22,7 +22,7 @@ class Orientation(object):
 
 		# publisher
 		#self.pub = rospy.Publisher('/gyro_acc_filter', Point, queue_size=1)
-		self.pub = rospy.Publisher('/gyro_acc_filter', Vector3Stamped, queue_size=10)
+		self.pub = rospy.Publisher('/gyro_acc_filter', Vector3Stamped, queue_size=1)
 		
 		 
 
@@ -54,7 +54,8 @@ class Orientation(object):
 
 		#self.pub.publish(Point(self.euler_zyx[2,0], self.euler_zyx[1,0],self.euler_zyx[0,0]))
 		self.pub.publish(orinetation_msg)
-		print(self.euler_zyx)
+		print('Running gyr_acc_filter')
+		#print(self.euler_zyx)
 		
 	def correction(self, data):
 		self.lock.acquire()

@@ -3,10 +3,14 @@
 #include "sensor_msgs/Image.h"
 #include "sensor_msgs/PointCloud.h"
 #include "geometry_msgs/Point32.h"
+#include "geometry_msgs/Vector3.h"
+#include "geometry_msgs/Vector3Stamped.h"
+
 #include "sensor_msgs/ChannelFloat32.h"
 #include <signal.h>
-#include <message_filters/subscriber.h>
-#include <message_filters/time_synchronizer.h> 
+//#include <message_filters/subscriber.h>
+//#include <message_filters/synchronizer.h> 
+//#include <message_filters/sync_policies/approximate_time.h>
 
 #include <random>
 #include <iostream> // for cout
@@ -62,6 +66,14 @@ public:
     double euler_zyx_diff_scan[3] = { 0 };
     double pos_xyz_diff_scan[3] = {0};
 
+    double img_time_stamp; 
+
+    geometry_msgs::Vector3Stamped gyr_acc_buffer[50];
+    int index_filter_buffer = 0;
+
+    double gyr_acc_filter_zyx[3];
+    int no_new_gyr = 1;
+
     Slam(){ 
         // constructor 
         for(int i = 0; i < res_h; i++){
@@ -82,9 +94,15 @@ public:
 
         img_to_cloud();
 
-
         scan_localization();
+
         scan_localization_map_update();
+        
+        if(no_new_gyr == 0){
+            img_time_stamp = (double)(msg->header.stamp.sec)+(double)(msg->header.stamp.nsec)*1e-9;
+            sync_filter(img_time_stamp);
+        }
+        
 
         // will be included in paricles later
         euler_zyx[0] += euler_zyx_diff_scan[0];
@@ -103,6 +121,42 @@ public:
 
         publish_cloud = 1; // will be moved to somewhere else when the map has been implemented 
     }
+
+    void filter_callback(const geometry_msgs::Vector3Stamped::ConstPtr& msg){
+        //double time_ = (double)(gyr_acc_buffer[0].header.stamp.sec)+(double)(gyr_acc_buffer[0].header.stamp.nsec)*1e-9;
+        //cout << "woring filter sub " <<msg->header.stamp << "  " << time_ << "\n"; // it does work...
+        gyr_acc_buffer[index_filter_buffer] = *msg;
+        index_filter_buffer += (index_filter_buffer < 49) ? 1 : -49;
+        // initial before the buffer has been filled. 
+        if (index_filter_buffer == 49){ 
+            no_new_gyr = 0;
+        }
+    }
+
+    
+    void sync_filter(double img_time){
+        double time_;
+        double diff_time;
+        double max_diff_time = 0.1;  
+        for(int i = 0; i < 50; i ++){
+            time_ = (double)(gyr_acc_buffer[i].header.stamp.sec)+(double)(gyr_acc_buffer[i].header.stamp.nsec)*1e-9;
+            diff_time = abs(time_ - img_time);
+            if (diff_time < max_diff_time){
+                //cout << "diff_time " << diff_time << "\n"; 
+                gyr_acc_filter_zyx[0] = gyr_acc_buffer[i].vector.z;
+                gyr_acc_filter_zyx[1] = gyr_acc_buffer[i].vector.y;
+                gyr_acc_filter_zyx[2] = gyr_acc_buffer[i].vector.x;
+                max_diff_time = diff_time;
+                no_new_gyr = 0;
+            }
+        }
+        if(max_diff_time > 0.099){
+            no_new_gyr = 1;
+        }
+
+    }
+
+
 
 private:
     // scan localization 
@@ -459,14 +513,19 @@ int main(int argc, char **argv){
 
     ros::Publisher publish_point_cloud = n.advertise<sensor_msgs::PointCloud>("PointCloud", 1);
 
-    ros::Subscriber sub = n.subscribe("/camera/depth/image_rect_raw", 10, &Slam::callback, &slam);
+    ros::Subscriber sub = n.subscribe("/camera/depth/image_rect_raw", 2, &Slam::callback, &slam);
+    ros::Subscriber filter_sub = n.subscribe("/gyro_acc_filter", 16, &Slam::filter_callback, &slam);
+    /* 
+    // not woring :(
+    message_filters::Subscriber<sensor_msgs::Image> image_sub(n, "/camera/depth/image_rect_raw", 1);
+    message_filters::Subscriber<geometry_msgs::Vector3Stamped> gyr_acc_filter_sub(n, "/gyro_acc_filter", 1);
 
-    /*
-    new code here
+    typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::Image, geometry_msgs::Vector3Stamped> MySyncPolicy;
 
-
+    message_filters::Synchronizer<MySyncPolicy> sync(MySyncPolicy(5), image_sub, gyr_acc_filter_sub);
+    // not sure how to call the callback fiunction inside the class. 
+    sync.registerCallback(boost::bind(&slam.callback, &slam, _1, _2));
     */
-
     ros::Rate loop_rate(10);
 
     uint32_t seq = 1;
