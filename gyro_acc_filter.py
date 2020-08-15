@@ -4,7 +4,7 @@ import rospy
 from sensor_msgs.msg import Imu
 import numpy as np
 import message_filters
-from geometry_msgs.msg import Quaternion, Point
+from geometry_msgs.msg import Quaternion, Point, Vector3, Vector3Stamped
 import threading
 
 class Orientation(object):
@@ -21,7 +21,9 @@ class Orientation(object):
 		self.lock = threading.Lock()
 
 		# publisher
-		self.pub = rospy.Publisher('/gyro_acc_filter', Point, queue_size=1)
+		#self.pub = rospy.Publisher('/gyro_acc_filter', Point, queue_size=1)
+		self.pub = rospy.Publisher('/gyro_acc_filter', Vector3Stamped, queue_size=10)
+		
 		 
 
 	def callback(self, gyr_data, acc_data):
@@ -44,7 +46,14 @@ class Orientation(object):
 		
 		self.euler_zyx = quaternions_to_euler_zyx(self.quaternions)
 		self.lock.release()
-		self.pub.publish(Point(self.euler_zyx[2,0], self.euler_zyx[1,0],self.euler_zyx[0,0]))
+
+		orinetation_msg = Vector3Stamped()
+		orinetation_msg.vector = Vector3(self.euler_zyx[2,0], self.euler_zyx[1,0],self.euler_zyx[0,0])
+		orinetation_msg.header = gyr_data.header
+	
+
+		#self.pub.publish(Point(self.euler_zyx[2,0], self.euler_zyx[1,0],self.euler_zyx[0,0]))
+		self.pub.publish(orinetation_msg)
 		print(self.euler_zyx)
 		
 	def correction(self, data):

@@ -5,6 +5,8 @@
 #include "geometry_msgs/Point32.h"
 #include "sensor_msgs/ChannelFloat32.h"
 #include <signal.h>
+#include <message_filters/subscriber.h>
+#include <message_filters/time_synchronizer.h> 
 
 #include <random>
 #include <iostream> // for cout
@@ -96,7 +98,7 @@ public:
         //time_last = time_now;
         int time = duration.count();
         double fps = 1.0/time *1000000;
-        cout << "Fps "<< fps << " rot " << euler_zyx[0] << " x "<< pos_xyz[0] <<" y "<< pos_xyz[0]<<" z "<< pos_xyz[2] << "\n";
+        cout << "Fps "<< fps << " rot " << euler_zyx[0] << " x "<< pos_xyz[0] <<" y "<< pos_xyz[1]<<" z "<< pos_xyz[2] << "\n";
 
 
         publish_cloud = 1; // will be moved to somewhere else when the map has been implemented 
@@ -121,7 +123,7 @@ private:
     double Ty;
     double Tz;
     double length = 0.25;
-    int rotation_view = 45;
+    int rotation_view = 15;
     int rot_resolution = 3;
     int r_steps = rotation_view/rot_resolution;
     int n_steps = length/map_resloution;
@@ -246,7 +248,7 @@ private:
                     +abs(pos_xyz_scan[2] - pos_xyz_update[2]) + 30*abs(euler_zyx_scan[0]-euler_zyx_update[0]);
 
 
-        if (update_value > 10 || first_run == 1){
+        if (update_value > 15 || first_run == 1){
 
             
             for(int i = 0; i < num_of_old_points; i++){
@@ -458,6 +460,12 @@ int main(int argc, char **argv){
     ros::Publisher publish_point_cloud = n.advertise<sensor_msgs::PointCloud>("PointCloud", 1);
 
     ros::Subscriber sub = n.subscribe("/camera/depth/image_rect_raw", 10, &Slam::callback, &slam);
+
+    /*
+    new code here
+
+
+    */
 
     ros::Rate loop_rate(10);
 
