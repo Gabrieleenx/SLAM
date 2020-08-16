@@ -114,11 +114,31 @@ public:
         
         
 
-        // will be included in paricles later
-        euler_zyx[0] = ((euler_zyx[0] + euler_zyx_diff_scan[0]) + gyr_acc_filter_zyx[0])/2;  // not sure if this is the opitmal way
+        // will be made into a function. 
+
+        if (abs((euler_zyx[0] + euler_zyx_diff_scan[0])-gyr_acc_filter_zyx[0]) < pi){
+            euler_zyx[0] = ((euler_zyx[0] + euler_zyx_diff_scan[0]) + gyr_acc_filter_zyx[0])/2;
+        }
+        else if (gyr_acc_filter_zyx[0] < 0) {
+            euler_zyx[0] = ((euler_zyx[0] + euler_zyx_diff_scan[0]) + (gyr_acc_filter_zyx[0]+2*pi))/2;
+        }
+        else
+        {
+            euler_zyx[0] = ((euler_zyx[0] + euler_zyx_diff_scan[0]) + (gyr_acc_filter_zyx[0]-2*pi))/2;
+        }   
+
+        if (euler_zyx[0] > pi){
+            euler_zyx[0] += -2*pi;
+        }
+        else if(euler_zyx[0] < -pi){
+            euler_zyx[0] += 2*pi;
+        }
+
         pos_xyz[0] += pos_xyz_diff_scan[0];
         pos_xyz[1] += pos_xyz_diff_scan[1];
         pos_xyz[2] += pos_xyz_diff_scan[2];
+
+        /* // correction back to gyr acc filter
 
         geometry_msgs::Vector3 msg_c;
         msg_c.z = euler_zyx[0] - gyr_acc_filter_zyx[0];
@@ -126,6 +146,7 @@ public:
         msg_c.x = euler_zyx[2] - gyr_acc_filter_zyx[2]; // not used no correct 
 
         publish_gyr_correction.publish(msg_c);
+        */
 
         // check computation time
         chrono::high_resolution_clock::time_point time_now = chrono::high_resolution_clock::now();
@@ -302,6 +323,13 @@ private:
         pos_xyz_scan[0] = Tx_loc;
         pos_xyz_scan[1] = Ty_loc;
         pos_xyz_scan[2] = Tz_loc;
+
+        // correction back to gyr acc filter
+
+        geometry_msgs::Vector3 msg_c;
+        msg_c.z = euler_zyx[0] - gyr_acc_filter_zyx[0]; 
+
+        publish_gyr_correction.publish(msg_c);
     }
 
     //
