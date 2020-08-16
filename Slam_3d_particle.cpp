@@ -71,10 +71,12 @@ public:
     geometry_msgs::Vector3Stamped gyr_acc_buffer[50];
     int index_filter_buffer = 0;
 
-    double gyr_acc_filter_zyx[3];
+    double gyr_acc_filter_zyx[3] = {};
     int no_new_gyr = 1;
 
-    Slam(){ 
+    ros::Publisher publish_gyr_correction;
+
+    Slam(ros::NodeHandle *n){ 
         // constructor 
         for(int i = 0; i < res_h; i++){
             horizontal_distance[i] = ((i+1)-(res_h/2))/focal_point;
@@ -82,8 +84,10 @@ public:
         for(int i = 0; i < res_v; i++){
             vertical_distance[i] = -1*((i+1)-(res_v/2))/focal_point;
         }
+
+        publish_gyr_correction = n->advertise<geometry_msgs::Vector3>("/orientation_correction", 1);
+
     }
-    
     
     void callback(const sensor_msgs::Image::ConstPtr& msg){
         chrono::high_resolution_clock::time_point time_last = chrono::high_resolution_clock::now();
@@ -98,17 +102,30 @@ public:
 
         scan_localization_map_update();
         
+        // syncronaize the data
         if(no_new_gyr == 0){
             img_time_stamp = (double)(msg->header.stamp.sec)+(double)(msg->header.stamp.nsec)*1e-9;
             sync_filter(img_time_stamp);
         }
+        else
+        {
+            gyr_acc_filter_zyx[0] = euler_zyx[0] + euler_zyx_diff_scan[0]; 
+        }
+        
         
 
         // will be included in paricles later
-        euler_zyx[0] += euler_zyx_diff_scan[0];
+        euler_zyx[0] = ((euler_zyx[0] + euler_zyx_diff_scan[0]) + gyr_acc_filter_zyx[0])/2;  // not sure if this is the opitmal way
         pos_xyz[0] += pos_xyz_diff_scan[0];
         pos_xyz[1] += pos_xyz_diff_scan[1];
         pos_xyz[2] += pos_xyz_diff_scan[2];
+
+        geometry_msgs::Vector3 msg_c;
+        msg_c.z = euler_zyx[0] - gyr_acc_filter_zyx[0];
+        msg_c.y = euler_zyx[1] - gyr_acc_filter_zyx[1]; // not used no correct 
+        msg_c.x = euler_zyx[2] - gyr_acc_filter_zyx[2]; // not used no correct 
+
+        publish_gyr_correction.publish(msg_c);
 
         // check computation time
         chrono::high_resolution_clock::time_point time_now = chrono::high_resolution_clock::now();
@@ -132,8 +149,7 @@ public:
             no_new_gyr = 0;
         }
     }
-
-    
+  
     void sync_filter(double img_time){
         double time_;
         double diff_time;
@@ -155,8 +171,6 @@ public:
         }
 
     }
-
-
 
 private:
     // scan localization 
@@ -202,6 +216,9 @@ private:
     int index_after_cov_2;
 
     void scan_localization(){
+        rot_y = gyr_acc_filter_zyx[1];
+        rot_x = gyr_acc_filter_zyx[2];
+    
         // upadate loc map
         for(int i = 0; i < num_of_old_points; i++){
             if (points_scan_map_life[i] > 0){
@@ -299,10 +316,11 @@ private:
         // delete old points in loc map
 
         update_value =  abs(pos_xyz_scan[0] - pos_xyz_update[0]) + abs(pos_xyz_scan[1] - pos_xyz_update[1])
-                    +abs(pos_xyz_scan[2] - pos_xyz_update[2]) + 30*abs(euler_zyx_scan[0]-euler_zyx_update[0]);
+                    +abs(pos_xyz_scan[2] - pos_xyz_update[2]) + 0.5*abs(euler_zyx_scan[0]-euler_zyx_update[0])
+                    + 0.5*abs(rot_y - euler_zyx_update[1]) + 0.5*abs(rot_x - euler_zyx_update[2]);
 
 
-        if (update_value > 15 || first_run == 1){
+        if (update_value > 0.15 || first_run == 1){
 
             
             for(int i = 0; i < num_of_old_points; i++){
@@ -313,7 +331,7 @@ private:
                         }
                     }
                     
-                    rotate_point(cloudpoints_rot_update, cloudpoints, cloudpoints_index, euler_zyx_scan[0], euler_zyx_scan[1], euler_zyx_scan[2]);
+                    rotate_point(cloudpoints_rot_update, cloudpoints, cloudpoints_index, euler_zyx_scan[0], rot_y, rot_x);
                     Translate_point(cloudpoints_rot_update, cloudpoints_rot_update, cloudpoints_index, pos_xyz_scan[0], pos_xyz_scan[1], pos_xyz_scan[2]);
                     // caclulate all index for new points.
 
@@ -353,8 +371,56 @@ private:
             pos_xyz_update[1] = pos_xyz_scan[1];
             pos_xyz_update[2] = pos_xyz_scan[2];
             euler_zyx_update[0] = euler_zyx_scan[0];
+            euler_zyx_update[1] = rot_y;
+            euler_zyx_update[2] = rot_x;
+
             cout << "update" << "\n"; 
         }
+
+        if (abs(pos_xyz_scan[0] - (map_size_x/2)) > 2 || abs(pos_xyz_scan[1] -
+             (map_size_y/2)) > 2|| abs(pos_xyz_scan[2] - (map_size_z/2)) > 1 ){
+
+            cout << "reset localization " << endl;
+            int offset_x = round(((map_size_x/2) - pos_xyz_scan[0])*map_conv);
+            int offset_y = round(((map_size_y/2) - pos_xyz_scan[1])*map_conv);
+            int offset_z = round(((map_size_z/2) - pos_xyz_scan[2])*map_conv);
+            int new_index = 0;
+            int offset_num = 0;
+            int correction_offset = index_conv(offset_x, offset_y, offset_z);
+            for(int i = 0; i < num_of_old_points; i++){
+
+                // also zero out previous map...
+                for(int j = i*res_h*res_v; j < i*res_h*res_v + points_scan_map_index[i]; j++){
+                    map_localization[points_scan_map[j]] = 0;
+                }
+                offset_num = 0;
+                for(int j = i*res_h*res_v; j < i*res_h*res_v + points_scan_map_index[i]; j++){
+                    // ofest all index 
+                    new_index = points_scan_map[j] + correction_offset;
+                    if (new_index < 0 || new_index >= map_elements){
+                        //cout << "index out of bound " << index_after_cov << "\n";
+                        offset_num += 1;
+                    }
+                    else{
+                        points_scan_map[j-offset_num] = new_index;
+                        
+                        //map_localization[index_after_cov] = 1;
+                    }
+
+                }
+                points_scan_map_index[i] += -offset_num;
+            }
+            
+            pos_xyz_update[0] += (map_size_x/2) - pos_xyz_scan[0];
+            pos_xyz_scan[0] =  (map_size_x/2);
+            pos_xyz_update[1] += (map_size_y/2) - pos_xyz_scan[1];
+            pos_xyz_scan[1] =  (map_size_y/2);
+            pos_xyz_update[2] += (map_size_z/2) - pos_xyz_scan[2];
+            pos_xyz_scan[2] =  (map_size_z/2);
+
+
+        }
+    
     }
     
     //
@@ -399,6 +465,8 @@ private:
         }
     }
 
+
+
     // variables for calc_mean_16
     int int8_to_int;
     int int_sum;
@@ -439,7 +507,6 @@ private:
         }
 
     }
-
 
 };
 
@@ -503,15 +570,15 @@ void mySigintHandler(int sig){
 
 int main(int argc, char **argv){
 
-    Slam slam;
 
     ros::init(argc, argv, "Slam", ros::init_options::NoSigintHandler);
 
     ros::NodeHandle n;
+    Slam slam = Slam(&n);
 
     signal(SIGINT, mySigintHandler);
 
-    ros::Publisher publish_point_cloud = n.advertise<sensor_msgs::PointCloud>("PointCloud", 1);
+    ros::Publisher publish_point_cloud = n.advertise<sensor_msgs::PointCloud>("/PointCloud", 1);
 
     ros::Subscriber sub = n.subscribe("/camera/depth/image_rect_raw", 2, &Slam::callback, &slam);
     ros::Subscriber filter_sub = n.subscribe("/gyro_acc_filter", 16, &Slam::filter_callback, &slam);

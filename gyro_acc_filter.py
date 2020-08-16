@@ -60,7 +60,7 @@ class Orientation(object):
 	def correction(self, data):
 		self.lock.acquire()
 		correction = self.euler_zyx[0,0] + data.z
-		self.quaternions = zyx_to_quat(correction[0,0],correction[1,0],correction[2,0])
+		self.quaternions = zyx_to_quat(correction, self.euler_zyx[1,0], self.euler_zyx[2,0])
 		self.lock.release()
 
 
@@ -190,7 +190,7 @@ def listener():
 	ts = message_filters.ApproximateTimeSynchronizer([gyr_sub, acc_sub], 1, 0.005, allow_headerless=False)
 	ts.registerCallback(orientation.callback)
 
-	rospy.Subscriber('/orientation_correction', Point, orientation.correction)
+	rospy.Subscriber('/orientation_correction', Vector3, orientation.correction)
 
 
 	rospy.spin()
