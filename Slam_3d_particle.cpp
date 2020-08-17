@@ -8,10 +8,8 @@
 
 #include "sensor_msgs/ChannelFloat32.h"
 #include <signal.h>
-//#include <message_filters/subscriber.h>
-//#include <message_filters/synchronizer.h> 
-//#include <message_filters/sync_policies/approximate_time.h>
 
+#include <math.h>
 #include <random>
 #include <iostream> // for cout
 #include <chrono>  // for timer
@@ -29,10 +27,24 @@ const static int map_grid_size_z = 4/0.05; // in met
 // global heap allocated memmory...
 int map_elements = map_grid_size_x*map_grid_size_y*map_grid_size_z;
 uint8_t* map_localization = new uint8_t[map_grid_size_x*map_grid_size_y*map_grid_size_z](); // ()initilizes to zero, hopefully. 
+int8_t* map_local = new int8_t[map_grid_size_x*map_grid_size_y*map_grid_size_z](); // ()initilizes to zero, hopefully. 
+
 // converion x*map_grid_size_y*map_grid_size_z + y*map_grid_size_z + z
 
 int index_conv(int x, int y, int z){
     return x*map_grid_size_y*map_grid_size_z + y*map_grid_size_z + z;
+}
+
+void reverse_index_conv(int index_out[3], int index_in){
+    int x;
+    int y;
+    int z;
+    x = index_in/(map_grid_size_y*map_grid_size_z);
+    y = (index_in-x*(map_grid_size_y*map_grid_size_z))/map_grid_size_z;
+    z = (index_in- x*(map_grid_size_y*map_grid_size_z) -y*map_grid_size_z);
+    index_out[0] = x;
+    index_out[1] = y;
+    index_out[2] = z;
 }
 
 class Slam{
@@ -62,7 +74,10 @@ public:
 
     double euler_zyx[3] = { 0 };
     double pos_xyz[3] = {map_size_x/2, map_size_y/2, map_size_z/2};
-
+    chrono::high_resolution_clock::time_point time_last = chrono::high_resolution_clock::now();
+    double euler_zyx_diff = 0;
+    double euler_zyx_diff_gyr = 0;
+    double euler_zyx_diff_gyr_old = 0;
     double euler_zyx_diff_scan[3] = { 0 };
     double pos_xyz_diff_scan[3] = {0};
 
@@ -74,7 +89,7 @@ public:
     double gyr_acc_filter_zyx[3] = {};
     int no_new_gyr = 1;
 
-    ros::Publisher publish_gyr_correction;
+    //ros::Publisher publish_gyr_correction;
 
     Slam(ros::NodeHandle *n){ 
         // constructor 
@@ -85,22 +100,18 @@ public:
             vertical_distance[i] = -1*((i+1)-(res_v/2))/focal_point;
         }
 
-        publish_gyr_correction = n->advertise<geometry_msgs::Vector3>("/orientation_correction", 1);
+        //publish_gyr_correction = n->advertise<geometry_msgs::Vector3>("/orientation_correction", 1);
 
     }
     
     void callback(const sensor_msgs::Image::ConstPtr& msg){
-        chrono::high_resolution_clock::time_point time_last = chrono::high_resolution_clock::now();
+        //chrono::high_resolution_clock::time_point time_last = chrono::high_resolution_clock::now();
 
         frame_id =  msg->header.frame_id; // should not change it but just in case
 
         resize_depth_to_array(msg->data);
 
         img_to_cloud();
-
-        scan_localization();
-
-        scan_localization_map_update();
         
         // syncronaize the data
         if(no_new_gyr == 0){
@@ -111,11 +122,15 @@ public:
         {
             gyr_acc_filter_zyx[0] = euler_zyx[0] + euler_zyx_diff_scan[0]; 
         }
-        
-        
+
+        scan_localization();
+
+        scan_localization_map_update();
+
+        build_local_map();
 
         // will be made into a function. 
-
+        /*
         if (abs((euler_zyx[0] + euler_zyx_diff_scan[0])-gyr_acc_filter_zyx[0]) < pi){
             euler_zyx[0] = ((euler_zyx[0] + euler_zyx_diff_scan[0]) + gyr_acc_filter_zyx[0])/2;
         }
@@ -126,7 +141,8 @@ public:
         {
             euler_zyx[0] = ((euler_zyx[0] + euler_zyx_diff_scan[0]) + (gyr_acc_filter_zyx[0]-2*pi))/2;
         }   
-
+        */
+        euler_zyx[0] += euler_zyx_diff;
         if (euler_zyx[0] > pi){
             euler_zyx[0] += -2*pi;
         }
@@ -138,20 +154,10 @@ public:
         pos_xyz[1] += pos_xyz_diff_scan[1];
         pos_xyz[2] += pos_xyz_diff_scan[2];
 
-        /* // correction back to gyr acc filter
-
-        geometry_msgs::Vector3 msg_c;
-        msg_c.z = euler_zyx[0] - gyr_acc_filter_zyx[0];
-        msg_c.y = euler_zyx[1] - gyr_acc_filter_zyx[1]; // not used no correct 
-        msg_c.x = euler_zyx[2] - gyr_acc_filter_zyx[2]; // not used no correct 
-
-        publish_gyr_correction.publish(msg_c);
-        */
-
         // check computation time
         chrono::high_resolution_clock::time_point time_now = chrono::high_resolution_clock::now();
         auto duration = chrono::duration_cast<chrono::microseconds>(time_now - time_last);
-        //time_last = time_now;
+        time_last = time_now;
         int time = duration.count();
         double fps = 1.0/time *1000000;
         cout << "Fps "<< fps << " rot " << euler_zyx[0] << " x "<< pos_xyz[0] <<" y "<< pos_xyz[1]<<" z "<< pos_xyz[2] << "\n";
@@ -204,7 +210,7 @@ private:
     double rot_z_loc = 0;
     double rot_z;
     double rot_y = 0; // will be changeds to be from gyr acc fitler 
-    double rot_x = 0; // will be changeds to be from gyr acc fitler 
+    double rot_x = 0.1; // will be changeds to be from gyr acc fitler 
     double Tx_loc = map_size_x/2;
     double Ty_loc = map_size_y/2;
     double Tz_loc = map_size_z/2;
@@ -325,11 +331,27 @@ private:
         pos_xyz_scan[2] = Tz_loc;
 
         // correction back to gyr acc filter
+        
+       
 
-        geometry_msgs::Vector3 msg_c;
-        msg_c.z = euler_zyx[0] - gyr_acc_filter_zyx[0]; 
 
-        publish_gyr_correction.publish(msg_c);
+        if (abs(euler_zyx_diff_gyr_old-gyr_acc_filter_zyx[0]) < pi){
+            euler_zyx_diff_gyr =  gyr_acc_filter_zyx[0] - euler_zyx_diff_gyr_old;
+        }
+        else if (gyr_acc_filter_zyx[0] < 0) {
+            euler_zyx_diff_gyr =  2*pi+gyr_acc_filter_zyx[0] - euler_zyx_diff_gyr_old;
+        }
+        else
+        {
+            euler_zyx_diff_gyr =  -2*pi + gyr_acc_filter_zyx[0] - euler_zyx_diff_gyr_old;
+        }   
+        euler_zyx_diff_gyr_old = gyr_acc_filter_zyx[0];
+        euler_zyx_diff = (euler_zyx_diff_gyr+ euler_zyx_diff_scan[0])/2;
+
+        //geometry_msgs::Vector3 msg_c;
+        //msg_c.z = euler_zyx[0] - gyr_acc_filter_zyx[0]; 
+
+        //publish_gyr_correction.publish(msg_c);
     }
 
     //
@@ -493,8 +515,6 @@ private:
         }
     }
 
-
-
     // variables for calc_mean_16
     int int8_to_int;
     int int_sum;
@@ -517,7 +537,7 @@ private:
         }
         return (devide_sum != 0) ? int_sum/devide_sum : 0; // returns mean
     }
-
+     
     // calculate cloudpoints
     
     void img_to_cloud(){
@@ -536,7 +556,103 @@ private:
 
     }
 
+    // calc norm between two points. 
+    double norm(double x1, double x2, double y1, double y2, double z1, double z2){
+        return sqrt((x1-x2)*(x1-x2) + (y1-y2)*(y1-y2) + (z1-z2)*(z1-z2));
+    }
+
+    // build local map 
+    double local_pos_xyz[3] = {(map_size_x/2), (map_size_y/2), (map_size_z/3)};
+    double local_euler_zyx[3] = { 0 };
+
+    void build_local_map(){
+        local_pos_xyz[0] += pos_xyz_diff_scan[0];
+        local_pos_xyz[1] += pos_xyz_diff_scan[1];
+        local_pos_xyz[2] += pos_xyz_diff_scan[2];
+        local_euler_zyx[0] += euler_zyx_diff;
+        // roatate points
+        rotate_point(cloudpoints_rot_update, cloudpoints, cloudpoints_index, local_euler_zyx[0], rot_y, rot_x);              
+        // translate points
+        Translate_point(cloudpoints_rot_update, cloudpoints_rot_update, cloudpoints_index, 
+                local_pos_xyz[0], local_pos_xyz[1], local_pos_xyz[2]);
+        for(int i = 0; i < cloudpoints_index; i++){
+            // check distance, i.e reject if more then 3 meters away. 
+            double norm_ = norm(cloudpoints_rot_update[i][0], local_pos_xyz[0], cloudpoints_rot_update[i][1],
+                                 local_pos_xyz[1], cloudpoints_rot_update[i][2], local_pos_xyz[2]);
+            
+            if(norm_ > 3){
+                continue;
+            }
+            // point to index
+            indx[0] = round((cloudpoints_rot_update[i][0]) * map_conv);
+            indx[1] = round((cloudpoints_rot_update[i][1]) * map_conv);
+            indx[2] = round((cloudpoints_rot_update[i][2]) * map_conv);
+            index_after_cov = index_conv(indx[0], indx[1], indx[2]);
+            if (index_after_cov < 0 || index_after_cov >= map_elements){
+                //cout << "index out of bound " << index_after_cov << "\n";
+            }
+            else{
+                // index to map
+                map_local[index_after_cov] += 5;
+
+                // clip map. 
+                if(map_local[index_after_cov] > 50){
+                    map_local[index_after_cov] = 50;
+                }
+                //else if (map_local[index_after_cov] < -50){
+                //    map_local[index_after_cov] = -50;
+                //}
+
+            }
+        }
+        //ray cast
+        
+        random_device rd_l; // create random random seed
+        mt19937 gen_l(rd_l()); // put the seed inte the random generator 
+        uniform_int_distribution<> distr_l(0, cloudpoints_index); // create a distrobution
+        double ray_cast_point[3];
+        for(int i = 0; i<2400; i++){
+            random_index = distr_l(gen_l);
+            ray_cast_point[0] = cloudpoints_rot_update[random_index][0];
+            ray_cast_point[1] = cloudpoints_rot_update[random_index][1];
+            ray_cast_point[2] = cloudpoints_rot_update[random_index][2];
+            double norm_ = norm(ray_cast_point[0], local_pos_xyz[0], ray_cast_point[1],
+                                 local_pos_xyz[1], ray_cast_point[2], local_pos_xyz[2]);
+            //double length = norm_*map_conv;
+            int ray_iteration = round((norm_*map_conv));
+            if (norm_ > 3){
+                int ray_iteration = 3*map_conv;
+            }
+ 
+            double ray_dx = (ray_cast_point[0] - local_pos_xyz[0])/(norm_*map_conv);
+            double ray_dy = (ray_cast_point[1] - local_pos_xyz[1])/(norm_*map_conv);
+            double ray_dz = (ray_cast_point[2] - local_pos_xyz[2])/(norm_*map_conv);
+
+            for (int j = 1; j < ray_iteration; j++){
+
+                indx[0] = round(( local_pos_xyz[0] + ray_dx*j) * map_conv);
+                indx[1] = round((local_pos_xyz[1] + ray_dy*j) * map_conv);
+                indx[2] = round((local_pos_xyz[2] + ray_dz*j) * map_conv);
+                index_after_cov = index_conv(indx[0], indx[1], indx[2]);
+                if (index_after_cov < 0 || index_after_cov >= map_elements){
+                }
+                else{
+                    // index to map
+                    map_local[index_after_cov] += -2;
+
+                    // clip map. 
+                    if(map_local[index_after_cov] < -50){
+                        map_local[index_after_cov] = -50;
+                    }
+                }
+            } 
+
+        }
+        
+    }
 };
+
+
 
 void publish_cloud_points(const Slam& slam, ros::Publisher& pub, uint32_t seq){
     // creates pointcloud message and publish it. 
@@ -554,9 +670,10 @@ void publish_cloud_points(const Slam& slam, ros::Publisher& pub, uint32_t seq){
 
         point_rgb.name = "rgb";
 
-        unsigned int packed_int_rgb;
+        uint32_t packed_int_rgb;
         float packed_float_rgb;
-
+        // for puublish input 
+        /*
         for(int i = 0; i < slam.cloudpoints_index; i++){
             point32.x = slam.cloudpoints[i][0];
             point32.y = -slam.cloudpoints[i][2];
@@ -574,6 +691,32 @@ void publish_cloud_points(const Slam& slam, ros::Publisher& pub, uint32_t seq){
             point_rgb.values.push_back(packed_float_rgb);
             
         }
+        */
+
+        // PUBLISH MAP LOCAL
+        for(int i = 0; i < map_elements; i++){
+            
+            if (map_local[i] > 5){
+                int index_map_pub[3];
+                reverse_index_conv(index_map_pub, i);
+                point32.x = index_map_pub[0]*map_resloution;
+                point32.y = -index_map_pub[2]*map_resloution;
+                point32.z = index_map_pub[1]*map_resloution;
+                msg.points.push_back(point32);
+                red = (uint8_t)((index_map_pub[2]*map_resloution)*60);
+                green = (uint8_t)100;
+                blue = (uint8_t)(255 - ((index_map_pub[2]*map_resloution)*60));
+
+                packed_int_rgb = (red <<16) | (green << 8) | blue;
+                packed_float_rgb = *reinterpret_cast<float*>(&packed_int_rgb);
+                //packed_float_rgb = (float) ( ((double) packed_int_rgb)/((double) (1<<24)) );
+                point_rgb.values.push_back(packed_float_rgb);
+            }
+
+            
+        }
+
+
         msg.channels.push_back(point_rgb);
         pub.publish(msg);
 
@@ -584,8 +727,10 @@ void publish_cloud_points(const Slam& slam, ros::Publisher& pub, uint32_t seq){
 }
 
 void mySigintHandler(int sig){
+    
     // do pre shutdown, like delete heap memmory..
     delete[] map_localization; 
+    delete[] map_local;
     // does result in a segmentation fault as other 
     //thredes will look for this at the moment of shutdown. 
 
@@ -594,6 +739,7 @@ void mySigintHandler(int sig){
 
     ros::shutdown();
 }
+
 
 
 int main(int argc, char **argv){
@@ -606,22 +752,15 @@ int main(int argc, char **argv){
 
     signal(SIGINT, mySigintHandler);
 
+    ros::AsyncSpinner spinner(0);
+    spinner.start();
+
     ros::Publisher publish_point_cloud = n.advertise<sensor_msgs::PointCloud>("/PointCloud", 1);
 
     ros::Subscriber sub = n.subscribe("/camera/depth/image_rect_raw", 2, &Slam::callback, &slam);
     ros::Subscriber filter_sub = n.subscribe("/gyro_acc_filter", 16, &Slam::filter_callback, &slam);
-    /* 
-    // not woring :(
-    message_filters::Subscriber<sensor_msgs::Image> image_sub(n, "/camera/depth/image_rect_raw", 1);
-    message_filters::Subscriber<geometry_msgs::Vector3Stamped> gyr_acc_filter_sub(n, "/gyro_acc_filter", 1);
 
-    typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::Image, geometry_msgs::Vector3Stamped> MySyncPolicy;
-
-    message_filters::Synchronizer<MySyncPolicy> sync(MySyncPolicy(5), image_sub, gyr_acc_filter_sub);
-    // not sure how to call the callback fiunction inside the class. 
-    sync.registerCallback(boost::bind(&slam.callback, &slam, _1, _2));
-    */
-    ros::Rate loop_rate(10);
+    ros::Rate loop_rate(1);
 
     uint32_t seq = 1;
 
@@ -631,7 +770,7 @@ int main(int argc, char **argv){
         loop_rate.sleep();
         ++seq;
     }
-    ros::spin();
+    ros::waitForShutdown();
 
 
 
