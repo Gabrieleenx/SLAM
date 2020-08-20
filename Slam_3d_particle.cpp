@@ -5,10 +5,14 @@
 #include "geometry_msgs/Point32.h"
 #include "geometry_msgs/Vector3.h"
 #include "geometry_msgs/Vector3Stamped.h"
+#include "geometry_msgs/Pose.h"
+#include "geometry_msgs/PoseStamped.h"
 
 #include "sensor_msgs/ChannelFloat32.h"
 #include <signal.h>
 
+#include <thread>
+#include <mutex>
 #include <math.h>
 #include <random>
 #include <iostream> // for cout
@@ -19,20 +23,66 @@ using namespace std;
 const static double map_resloution = 0.05; // in meters
 const double pi = 2*acos(0.0);
 
+// mutex for when copying data from local map to particles 
+mutex mtx;
 
 // map grid resolution 0.05 meters.
 const static int map_grid_size_x = 10/0.05;// in meters
 const static int map_grid_size_y = 10/0.05; // in meters
 const static int map_grid_size_z = 4/0.05; // in met
+
+// map grid resolution 0.05 meters.
+//const static int particle_map_grid_size_x = 10/0.05;// in meters
+//const static int particle_map_grid_size_y = 10/0.05; // in meters
+//const static int particle_map_grid_size_z = 4/0.05; // in met
+// Particles
+struct map_particles {
+    const static int p_map_grid_size_x = 15/0.05;// in meters
+    const static int p_map_grid_size_y = 15/0.05; // in meters
+    const static int p_map_grid_size_z = 4/0.05; // in met
+    const static int map_legth_x = 15;
+    const static int map_legth_y = 15;
+    const static int map_legth_z = 4;
+    const static int p_map_elements = p_map_grid_size_x*p_map_grid_size_y*p_map_grid_size_z;
+    double pos_x = 7.5;
+    double pos_y = 7.5;
+    double pos_z = 1.5;
+    double rot_z = 0.0;
+    double weight = 1.0/50;
+    uint8_t map[p_map_grid_size_x*p_map_grid_size_y*p_map_grid_size_z] =  {0};
+};
+
+// build local map 
+double local_pos_xyz[3] = {(10/2), (10/2), (1.5)};
+double local_euler_zyx[3] = { 0 };
+double euler_zyx[3] = { 0 };
+double pos_xyz[3] = {7.5, 7.5, 1.5}; // same as for particle system 
+double pos_xyz_diff[3] = {0, 0, 0}; // same as for particle system 
+double rot_z_diff = 0;
 // global heap allocated memmory...
 int map_elements = map_grid_size_x*map_grid_size_y*map_grid_size_z;
 uint8_t* map_localization = new uint8_t[map_grid_size_x*map_grid_size_y*map_grid_size_z](); // ()initilizes to zero, hopefully. 
 int8_t* map_local = new int8_t[map_grid_size_x*map_grid_size_y*map_grid_size_z](); // ()initilizes to zero, hopefully. 
 
+int8_t* map_local_copy = new int8_t[map_grid_size_x*map_grid_size_y*map_grid_size_z](); // ()initilizes to zero, hopefully. 
+int num_particles = 50;
+map_particles* Particles = new map_particles[50];
+
+void initilize_particles_map(){
+    for (int i = 0; i < num_particles; i++){
+        for  (int j = 0; j < Particles[0].p_map_elements; j++){
+            Particles[i].map[j] = 50;
+        }
+    }
+}
+
 // converion x*map_grid_size_y*map_grid_size_z + y*map_grid_size_z + z
 
 int index_conv(int x, int y, int z){
     return x*map_grid_size_y*map_grid_size_z + y*map_grid_size_z + z;
+}
+int index_conv_p(int x, int y, int z){
+    return x*(15/0.05)*(4/0.05) + y*(4/0.05) + z;
 }
 
 void reverse_index_conv(int index_out[3], int index_in){
@@ -42,6 +92,18 @@ void reverse_index_conv(int index_out[3], int index_in){
     x = index_in/(map_grid_size_y*map_grid_size_z);
     y = (index_in-x*(map_grid_size_y*map_grid_size_z))/map_grid_size_z;
     z = (index_in- x*(map_grid_size_y*map_grid_size_z) -y*map_grid_size_z);
+    index_out[0] = x;
+    index_out[1] = y;
+    index_out[2] = z;
+}
+
+void reverse_index_conv_p(int index_out[3], int index_in){
+    int x;
+    int y;
+    int z;
+    x = index_in/((15/0.05)*(4/0.05));
+    y = (index_in-x*((15/0.05)*(4/0.05)))/(4/0.05);
+    z = (index_in- x*((15/0.05)*(4/0.05)) -y*(4/0.05));
     index_out[0] = x;
     index_out[1] = y;
     index_out[2] = z;
@@ -72,8 +134,7 @@ public:
     const static int map_size_y = 10; // in meters
     const static int map_size_z = 4; // in meters
 
-    double euler_zyx[3] = { 0 };
-    double pos_xyz[3] = {map_size_x/2, map_size_y/2, map_size_z/2};
+
     chrono::high_resolution_clock::time_point time_last = chrono::high_resolution_clock::now();
     double euler_zyx_diff = 0;
     double euler_zyx_diff_gyr = 0;
@@ -89,7 +150,7 @@ public:
     double gyr_acc_filter_zyx[3] = {};
     int no_new_gyr = 1;
 
-    //ros::Publisher publish_gyr_correction;
+    ros::Publisher pose_pub;
 
     Slam(ros::NodeHandle *n){ 
         // constructor 
@@ -100,7 +161,7 @@ public:
             vertical_distance[i] = -1*((i+1)-(res_v/2))/focal_point;
         }
 
-        //publish_gyr_correction = n->advertise<geometry_msgs::Vector3>("/orientation_correction", 1);
+        pose_pub = n->advertise<geometry_msgs::PoseStamped>("/Pose", 1);
 
     }
     
@@ -129,30 +190,7 @@ public:
 
         build_local_map();
 
-        // will be made into a function. 
-        /*
-        if (abs((euler_zyx[0] + euler_zyx_diff_scan[0])-gyr_acc_filter_zyx[0]) < pi){
-            euler_zyx[0] = ((euler_zyx[0] + euler_zyx_diff_scan[0]) + gyr_acc_filter_zyx[0])/2;
-        }
-        else if (gyr_acc_filter_zyx[0] < 0) {
-            euler_zyx[0] = ((euler_zyx[0] + euler_zyx_diff_scan[0]) + (gyr_acc_filter_zyx[0]+2*pi))/2;
-        }
-        else
-        {
-            euler_zyx[0] = ((euler_zyx[0] + euler_zyx_diff_scan[0]) + (gyr_acc_filter_zyx[0]-2*pi))/2;
-        }   
-        */
-        euler_zyx[0] += euler_zyx_diff;
-        if (euler_zyx[0] > pi){
-            euler_zyx[0] += -2*pi;
-        }
-        else if(euler_zyx[0] < -pi){
-            euler_zyx[0] += 2*pi;
-        }
-
-        pos_xyz[0] += pos_xyz_diff_scan[0];
-        pos_xyz[1] += pos_xyz_diff_scan[1];
-        pos_xyz[2] += pos_xyz_diff_scan[2];
+        pub_pose_func();
 
         // check computation time
         chrono::high_resolution_clock::time_point time_now = chrono::high_resolution_clock::now();
@@ -160,10 +198,27 @@ public:
         time_last = time_now;
         int time = duration.count();
         double fps = 1.0/time *1000000;
-        cout << "Fps "<< fps << " rot " << euler_zyx[0] << " x "<< pos_xyz[0] <<" y "<< pos_xyz[1]<<" z "<< pos_xyz[2] << "\n";
+        //cout << "Fps "<< fps << " rot " << euler_zyx[0] << " x "<< pos_xyz[0] <<" y "<< pos_xyz[1]<<" z "<< pos_xyz[2] << "\n";
 
 
-        publish_cloud = 1; // will be moved to somewhere else when the map has been implemented 
+        publish_cloud = 1; 
+    }
+
+    void pub_pose_func(){
+        geometry_msgs::PoseStamped pose_msg;
+        pose_msg.header.frame_id = frame_id;
+        pose_msg.header.stamp = ros::Time::now();
+        geometry_msgs::Pose pose_o;
+        pose_o.orientation.w = cos((-euler_zyx[0]-pi/2)/2);
+        pose_o.orientation.x =0;
+        pose_o.orientation.y =sin((-euler_zyx[0]-pi/2)/2);
+        pose_o.orientation.z = 0;
+        pose_o.position.x = pos_xyz[0];
+        pose_o.position.y = -pos_xyz[2];
+        pose_o.position.z = pos_xyz[1];
+        pose_msg.pose = pose_o;
+        pose_pub.publish(pose_msg);
+
     }
 
     void filter_callback(const geometry_msgs::Vector3Stamped::ConstPtr& msg){
@@ -320,11 +375,11 @@ private:
             }
         }
 
-        euler_zyx_diff_scan[0] = rot_z_loc - euler_zyx_scan[0];
-        pos_xyz_diff_scan[0] = Tx_loc - pos_xyz_scan[0];
-        pos_xyz_diff_scan[1] = Ty_loc - pos_xyz_scan[1];
+        
+        pos_xyz_diff_scan[0] = cos(-euler_zyx_scan[0])*(Tx_loc - pos_xyz_scan[0]) - sin(-euler_zyx_scan[0])*(Ty_loc - pos_xyz_scan[1]);
+        pos_xyz_diff_scan[1] = sin(-euler_zyx_scan[0])*(Tx_loc - pos_xyz_scan[0]) + cos(-euler_zyx_scan[0])*(Ty_loc - pos_xyz_scan[1]);
         pos_xyz_diff_scan[2] = Tz_loc - pos_xyz_scan[2];
-
+        euler_zyx_diff_scan[0] = rot_z_loc - euler_zyx_scan[0];
         euler_zyx_scan[0] = rot_z_loc;
         pos_xyz_scan[0] = Tx_loc;
         pos_xyz_scan[1] = Ty_loc;
@@ -561,11 +616,10 @@ private:
         return sqrt((x1-x2)*(x1-x2) + (y1-y2)*(y1-y2) + (z1-z2)*(z1-z2));
     }
 
-    // build local map 
-    double local_pos_xyz[3] = {(map_size_x/2), (map_size_y/2), (map_size_z/3)};
-    double local_euler_zyx[3] = { 0 };
+
 
     void build_local_map(){
+        mtx.lock();
         local_pos_xyz[0] += pos_xyz_diff_scan[0];
         local_pos_xyz[1] += pos_xyz_diff_scan[1];
         local_pos_xyz[2] += pos_xyz_diff_scan[2];
@@ -593,7 +647,7 @@ private:
             }
             else{
                 // index to map
-                map_local[index_after_cov] += 5;
+                map_local[index_after_cov] += 10;
 
                 // clip map. 
                 if(map_local[index_after_cov] > 50){
@@ -638,7 +692,7 @@ private:
                 }
                 else{
                     // index to map
-                    map_local[index_after_cov] += -2;
+                    map_local[index_after_cov] += -3;
 
                     // clip map. 
                     if(map_local[index_after_cov] < -50){
@@ -648,15 +702,270 @@ private:
             } 
 
         }
+
+        update_realtime_pos();
+
+        mtx.unlock();
         
+    }
+
+    void update_realtime_pos(){
+        pos_xyz[0] += cos(euler_zyx[0])*pos_xyz_diff_scan[0] - sin(euler_zyx[0])*pos_xyz_diff_scan[1] + pos_xyz_diff[0];
+        pos_xyz[1] += sin(euler_zyx[0])*pos_xyz_diff_scan[0] + cos(euler_zyx[0])*pos_xyz_diff_scan[1] + pos_xyz_diff[1];
+        pos_xyz[2] += pos_xyz_diff_scan[2] + pos_xyz_diff[2];
+        euler_zyx[0] += euler_zyx_diff + rot_z_diff;
+        if (euler_zyx[0] > pi){
+            euler_zyx[0] += -2*pi;
+        }
+        else if(euler_zyx[0] < -pi){
+            euler_zyx[0] += 2*pi;
+        }
+        rot_z_diff = 0; 
+        pos_xyz_diff[0] = 0;
+        pos_xyz_diff[1] = 0;
+        pos_xyz_diff[2] = 0;
+
     }
 };
 
+void rot_matrix(double matrix[3][3], double z, double y, double x){
+    // need to be implemented...
+    matrix[0][0] = cos(y)*cos(z);
+    matrix[0][1] = cos(z)*sin(x)*sin(y) - cos(x)*sin(z);
+    matrix[0][2] = sin(x)*sin(z) + cos(x)*cos(z)*sin(y);
+    matrix[1][0] = cos(y)*sin(z);
+    matrix[1][1] = cos(x)*cos(z) + sin(x)*sin(y)*sin(z);
+    matrix[1][2] = cos(x)*sin(y)*sin(z) - cos(z)*sin(x);
+    matrix[2][0] = -sin(y);
+    matrix[2][1] = cos(y)*sin(x);
+    matrix[2][2] = cos(x)*cos(y);
+}
 
+void rotate(double new_point[3], int point[3], double Rot_M[3][3]){
+    new_point[0] = Rot_M[0][0] * point[0] + Rot_M[0][1] * point[1] + Rot_M[0][2] * point[2];
+    new_point[1] = Rot_M[1][0] * point[0] + Rot_M[1][1] * point[1] + Rot_M[1][2] * point[2];
+    new_point[2] = Rot_M[2][0] * point[0] + Rot_M[2][1] * point[1] + Rot_M[2][2] * point[2];
+}
+
+void reset_local_map(){
+    for(int i = 0; i < map_elements; i++){
+        map_local[i] = 0;
+    }   
+}
+
+int index_high_weight = 0;
+void resample(){
+    double last_high_weight = 0;
+
+    double resample_list[num_particles+1];
+    int resample_index[num_particles];
+    double sum_ = 0;
+    resample_list[0] = 0;
+    for(int i = 0; i < num_particles; i++){
+        sum_ += Particles[i].weight;
+        resample_list[i+1] = sum_;
+    }
+    random_device rd; // create random random seed
+    mt19937 gen(rd()); // put the seed inte the random generator 
+    uniform_real_distribution<double> distr(0.0, 1.0); // create a distrobution
+
+    for(int i = 0; i < num_particles; i++){
+        double rand_val = distr(gen);
+        for (int j = 1; j < num_particles+1; j++){
+            if(rand_val > resample_list[j-1] && rand_val < resample_list[j]){
+                resample_index[i] = j-1;
+                break;
+            }
+        }
+    }
+    // organize to minimize copying data.
+    int resample_index_org[num_particles] = { 1 };
+    int resample_index_taken[num_particles] = { 0 };
+    for (int i = 0; i < num_particles; i++){
+        resample_index_taken[resample_index[i]] = 1;
+    }
+    for (int i = 0; i < num_particles; i++){
+        if(resample_index[i] == resample_index_org[resample_index[i]]){
+            for(int j = 0; j < num_particles; j++){
+                if (resample_index_taken[j] ==0){
+                    resample_index_org[j] = resample_index[i];
+                    resample_index_taken[j] = 1;
+                }
+            }
+        }
+        else
+        {
+            resample_index_org[resample_index[i]] = resample_index[i];
+        }
+        
+    }
+
+    // copy data
+    for(int i = 0; i < num_particles; i++){
+        if (resample_index_org[i] == i){
+            continue;
+        }
+        else{
+            Particles[i] = Particles[resample_index_org[i]];
+        }
+    }
+
+        // save index with higest weight 
+    for(int i = 0; i < num_particles; i++){
+        if (Particles[i].weight > last_high_weight){
+            index_high_weight = i;
+            last_high_weight = Particles[i].weight;
+        }
+    }
+}
+
+int add_points = 1;
+double pos_last_update[3] = {7.5, 7.5, 1.5};
+double rot_last_update = 0;
+
+void particle_map(){
+    double p_rot_local_z;
+    double p_pos_local_xyz[3];
+    double p_rot_z;
+    double p_pos_xyz[3];
+    // copy data needed 
+    mtx.lock();
+    memcpy(map_local_copy, map_local, map_elements);
+    p_rot_local_z = local_euler_zyx[0];
+    memcpy(&p_pos_local_xyz, &local_pos_xyz, sizeof(local_pos_xyz));
+    p_rot_z = euler_zyx[0];
+    memcpy(&p_pos_xyz, &pos_xyz, sizeof(p_pos_xyz));
+    // reset local map  7
+    reset_local_map();
+    local_euler_zyx[0] = 0;
+    local_pos_xyz[0] = 5;
+    local_pos_xyz[1] = 5;
+    local_pos_xyz[2] = 1.5;
+    // unclock mutex
+    mtx.unlock();
+
+    double Rot_matrix[3][3];
+    double rot_indx[3];
+    int local_indx[3];
+    int P_map_indx;
+    random_device rd; // create random random seed
+    mt19937 gen(rd()); // put the seed inte the random generator 
+    normal_distribution<float> pos_d(0, 0.03); // create a distrobution
+    normal_distribution<float> rot_d(0, 0.02); // create a distrobution
+    double sum_weights = 0;
+    int num_match = 0;
+    int sum_match[num_particles] = {0};
+    for(int i = 0; i < num_particles; i++){
+        rot_matrix(Rot_matrix, Particles[i].rot_z, 0.0, 0.0);
+        // translate indx
+        double T_x = Particles[i].pos_x * 1/map_resloution;
+        double T_y = Particles[i].pos_y * 1/map_resloution;
+        double T_z = Particles[i].pos_z * 1/map_resloution;
+        num_match = 0;
+
+        int new_value;
+        for(int j = 0; j < map_elements; j++){
+            // if 0 do nothing 
+            if(map_local_copy[j] == 0){
+                continue;
+            }
+            // rotate and translate
+            reverse_index_conv(local_indx, j);
+            local_indx[0] += -100; // 5/0.05
+            local_indx[1] += -100; // 5/0.05
+            local_indx[2] += -30; // 1.5/0.05
+            rotate(rot_indx, local_indx, Rot_matrix);
+
+            P_map_indx = index_conv_p(round(rot_indx[0] + T_x), round(rot_indx[1] + T_y), round(rot_indx[2] + T_z));
+            // check if index is inside of map.
+            if(P_map_indx < 0 || P_map_indx > Particles[i].p_map_elements){
+                continue;
+            }
+            //if larger then 20; match 
+            if(map_local_copy[j] > 20){
+                sum_match[i] += Particles[i].map[P_map_indx];
+                num_match += 1;
+            }
+
+            // add to map 
+            if (add_points == 0){
+                continue;
+            }
+            new_value = Particles[i].map[P_map_indx] + map_local_copy[j];
+            if (new_value < 0){
+                Particles[i].map[P_map_indx] = 0;
+            }
+            else if (new_value > 100){
+                Particles[i].map[P_map_indx] = 100;
+            }
+            else{
+                Particles[i].map[P_map_indx] = new_value;
+            }
+            //}
+           
+
+        }
+       
+        // update position and orientation
+        Particles[i].pos_x += cos(Particles[i].rot_z)*(p_pos_local_xyz[0]-5) - sin(Particles[i].rot_z)*(p_pos_local_xyz[1]-5) + pos_d(gen); // add noise
+        Particles[i].pos_y += sin(Particles[i].rot_z)*(p_pos_local_xyz[0]-5) + cos(Particles[i].rot_z)*(p_pos_local_xyz[1]-5) + pos_d(gen);
+        Particles[i].pos_z += p_pos_local_xyz[2]-1.5 + rot_d(gen);
+        Particles[i].rot_z += p_rot_local_z+ rot_d(gen);
+
+    }
+
+
+    // update weights
+    double smalest_sum = 1000000000000;
+    for(int i = 0; i < num_particles; i++){
+        if (smalest_sum > sum_match[i]){
+            smalest_sum = sum_match[i];
+        }
+    }
+
+    for (int i = 0; i < num_particles; i++){
+        Particles[i].weight = Particles[i].weight * (sum_match[i]-0.99*smalest_sum)*(sum_match[i]-0.99*smalest_sum)/num_match;
+        sum_weights += Particles[i].weight;
+    }
+
+    // normalize weights
+
+    cout << "weights" << " " << endl; 
+    for(int i = 0; i < num_particles; i++){
+        Particles[i].weight = (Particles[i].weight)/(sum_weights);
+        cout << Particles[i].weight << " "; 
+    }
+    cout << "weights" << " " << endl; 
+    // resample 
+    double moved = abs(p_pos_xyz[0] - pos_last_update[0])+ abs(p_pos_xyz[1] - pos_last_update[1])+ 
+        abs(p_pos_xyz[2] - pos_last_update[2])+  abs(p_rot_z - rot_last_update);
+    if (moved > 0.4){
+        add_points = 1;
+        pos_last_update[0] = p_pos_xyz[0];
+        pos_last_update[1] = p_pos_xyz[1];
+        pos_last_update[2] = p_pos_xyz[2];
+        rot_last_update = p_rot_z;
+        //resample();
+    }
+    else {
+        add_points = 0; 
+    }
+    resample();
+
+    pos_xyz_diff[0] = Particles[index_high_weight].pos_x - p_pos_xyz[0];
+    pos_xyz_diff[1] = Particles[index_high_weight].pos_y - p_pos_xyz[1];
+    pos_xyz_diff[2] = Particles[index_high_weight].pos_z - p_pos_xyz[2];
+    rot_z_diff = Particles[index_high_weight].rot_z - p_rot_z;
+    cout << "after resample"<< Particles[index_high_weight].pos_x << " " << Particles[index_high_weight].pos_y << " " << Particles[index_high_weight].pos_z << " " <<Particles[index_high_weight].rot_z  
+        << " index weight " <<  Particles[index_high_weight].weight << " " << index_high_weight << endl;
+}
 
 void publish_cloud_points(const Slam& slam, ros::Publisher& pub, uint32_t seq){
+    
+
     // creates pointcloud message and publish it. 
     if(slam.publish_cloud == 1){
+        //particle_map();
         sensor_msgs::PointCloud msg;
         msg.header.frame_id = slam.frame_id;
         msg.header.stamp = ros::Time::now();
@@ -691,12 +1000,10 @@ void publish_cloud_points(const Slam& slam, ros::Publisher& pub, uint32_t seq){
             point_rgb.values.push_back(packed_float_rgb);
             
         }
-        */
-
-        // PUBLISH MAP LOCAL
+        */ /*
         for(int i = 0; i < map_elements; i++){
             
-            if (map_local[i] > 5){
+            if (map_local[i] > 30){
                 int index_map_pub[3];
                 reverse_index_conv(index_map_pub, i);
                 point32.x = index_map_pub[0]*map_resloution;
@@ -714,30 +1021,57 @@ void publish_cloud_points(const Slam& slam, ros::Publisher& pub, uint32_t seq){
             }
 
             
-        }
+        }*/
 
+
+        cout << "publish map " << endl;
+        
+        // PUBLISH MAP
+        for(int i = 0; i < Particles[0].p_map_elements; i+=4){
+            
+            if (Particles[index_high_weight].map[i] > 80){
+                int index_map_pub[3];
+                reverse_index_conv_p(index_map_pub, i);
+                point32.x = index_map_pub[0]*map_resloution;
+                point32.y = -index_map_pub[2]*map_resloution;
+                point32.z = index_map_pub[1]*map_resloution;
+                msg.points.push_back(point32);
+                //red = (uint8_t)((index_map_pub[2]*map_resloution)*60);
+                //green = (uint8_t)100;
+                //blue = (uint8_t)(255 - ((index_map_pub[2]*map_resloution)*60));
+
+                //packed_int_rgb = (red <<16) | (green << 8) | blue;
+                //packed_float_rgb = *reinterpret_cast<float*>(&packed_int_rgb);
+                //packed_float_rgb = (float) ( ((double) packed_int_rgb)/((double) (1<<24)) );
+                //point_rgb.values.push_back(packed_float_rgb);
+            }
+
+            
+        }
+        
 
         msg.channels.push_back(point_rgb);
         pub.publish(msg);
-
-
 
     }
 
 }
 
 void mySigintHandler(int sig){
-    
+    cout << " Shutdown initilized " << "\n";
+    ros::shutdown(); 
     // do pre shutdown, like delete heap memmory..
     delete[] map_localization; 
     delete[] map_local;
+    delete[] Particles;
+    delete[] map_local_copy;
     // does result in a segmentation fault as other 
     //thredes will look for this at the moment of shutdown. 
 
     //
-    cout << " Shutdown initilized " << "\n";
+    cout << " Shutdown done " << "\n";
 
-    ros::shutdown();
+    
 }
 
 
@@ -749,7 +1083,7 @@ int main(int argc, char **argv){
 
     ros::NodeHandle n;
     Slam slam = Slam(&n);
-
+    initilize_particles_map(); //
     signal(SIGINT, mySigintHandler);
 
     ros::AsyncSpinner spinner(0);
@@ -760,13 +1094,17 @@ int main(int argc, char **argv){
     ros::Subscriber sub = n.subscribe("/camera/depth/image_rect_raw", 2, &Slam::callback, &slam);
     ros::Subscriber filter_sub = n.subscribe("/gyro_acc_filter", 16, &Slam::filter_callback, &slam);
 
-    ros::Rate loop_rate(1);
+    ros::Rate loop_rate(0.5);
 
     uint32_t seq = 1;
 
     while (ros::ok()){
         publish_cloud_points(slam, publish_point_cloud, seq);
+
         ros::spinOnce();
+        if(slam.publish_cloud == 1){
+            particle_map();
+        }
         loop_rate.sleep();
         ++seq;
     }
