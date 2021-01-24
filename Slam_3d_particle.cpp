@@ -790,6 +790,7 @@ void resample(){
                 if (resample_index_taken[j] ==0){
                     resample_index_org[j] = resample_index[i];
                     resample_index_taken[j] = 1;
+                    break;
                 }
             }
         }
